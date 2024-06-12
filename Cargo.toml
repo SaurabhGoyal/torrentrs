@@ -1,0 +1,7 @@
+[package]
+name = "torrentrs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bendy = "0.3.3"
