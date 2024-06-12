@@ -18,7 +18,8 @@ impl Client {
         let mut file = fs::OpenOptions::new().read(true).open(file_path).unwrap();
         let mut buf: Vec<u8> = vec![];
         let _ = file.read_to_end(&mut buf).unwrap();
-        bencode::decode(buf.as_slice());
+        let metainfo = bencode::decode(buf.as_slice());
+        println!("{:?}", metainfo);
         Err(ClientError::Unknown)
     }
 }
