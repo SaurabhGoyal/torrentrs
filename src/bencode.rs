@@ -1,4 +1,5 @@
 use crate::torrent;
+use crate::utils;
 use std::str;
 
 use bendy::decoding::{self, Decoder, Object};
@@ -18,12 +19,12 @@ const PIECES_KEY: [u8; 6] = [112, 105, 101, 99, 101, 115];
 
 pub fn decode(metainfo_buf: &[u8]) -> torrent::MetaInfo {
     let mut decoder = Decoder::new(metainfo_buf);
+    let mut info_hash: Option<String> = None;
     let mut tracker: Option<&str> = None;
     let mut file_name: Option<&str> = None;
     let mut file_length: Option<u64> = None;
     let mut piece_length: Option<u64> = None;
     let mut piece_hashes: Vec<[u8; torrent::PIECE_HASH_BYTE_LEN]> = vec![];
-    let mut pieces: Vec<torrent::Piece> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut metainfo_object))) = decoder.next_object() {
         while let Ok(Some((key, value))) = metainfo_object.next_pair() {
             if key == ANNOUNCE_KEY {
@@ -63,6 +64,9 @@ pub fn decode(metainfo_buf: &[u8]) -> torrent::MetaInfo {
                             }
                         }
                     }
+                    info_hash = Some(utils::bytes_to_hex_encoding(&utils::sha1_hash(
+                        value.into_raw().unwrap(),
+                    )));
                 }
             }
         }
@@ -80,5 +84,6 @@ pub fn decode(metainfo_buf: &[u8]) -> torrent::MetaInfo {
                 length: piece_length.unwrap(),
             })
             .collect(),
+        info_hash: info_hash.unwrap(),
     }
 }

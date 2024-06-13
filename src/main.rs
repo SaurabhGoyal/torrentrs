@@ -3,6 +3,7 @@ use std::env;
 mod bencode;
 mod client;
 mod torrent;
+mod utils;
 
 fn main() {
     let args = env::args().collect::<Vec<String>>();

@@ -1,8 +1,13 @@
+use crate::utils;
+use rand::RngCore;
+
 // Piece hash byte length
 pub const PIECE_HASH_BYTE_LEN: usize = 20;
 
 #[derive(Debug)]
-enum TorrentError {}
+pub enum TorrentError {
+    Unknown,
+}
 
 type Id = u64;
 
@@ -20,6 +25,7 @@ pub struct Piece {
 
 #[derive(Debug)]
 pub struct MetaInfo {
+    pub info_hash: String,
     pub tracker: String,
     pub files: Vec<File>,
     pub pieces: Vec<Piece>,
@@ -32,6 +38,26 @@ pub struct Torrent {
     peers: Vec<String>,
 }
 
-pub fn add(meta: MetaInfo) -> Torrent {
-    todo!()
+pub fn add(meta: MetaInfo) -> Result<Torrent, TorrentError> {
+    let mut peer_id = [0_u8; 20];
+    rand::thread_rng().fill_bytes(&mut peer_id);
+    let client = reqwest::blocking::Client::new();
+    let req = client
+        .get(meta.tracker)
+        .query(&[("info_hash", urlencoding::encode(meta.info_hash.as_str()))])
+        .query(&[(
+            "peer_id",
+            urlencoding::encode(utils::bytes_to_hex_encoding(&peer_id).as_str()),
+        )])
+        .query(&[("port", 6883)])
+        .query(&[("uploaded", 0)])
+        .query(&[("downloaded", 0)])
+        .query(&[("left", meta.files[0].length)])
+        .query(&[("compact", 0)])
+        .build()
+        .unwrap();
+    println!("Req -> {:?}", req);
+    let res = client.execute(req).unwrap().text().unwrap();
+    println!("Res -> {res}");
+    Err(TorrentError::Unknown)
 }
