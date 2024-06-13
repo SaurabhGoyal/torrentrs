@@ -42,22 +42,25 @@ pub fn add(meta: MetaInfo) -> Result<Torrent, TorrentError> {
     let mut peer_id = [0_u8; 20];
     rand::thread_rng().fill_bytes(&mut peer_id);
     let client = reqwest::blocking::Client::new();
+
+    // Workaround for issue with binary data - https://github.com/servo/rust-url/issues/219
+    let mut url = reqwest::Url::parse(meta.tracker.as_str()).unwrap();
+    url.set_query(Some(
+        format!(
+            "info_hash={}&peer_id={}",
+            meta.info_hash,
+            utils::bytes_to_hex_encoding(&peer_id)
+        )
+        .as_str(),
+    ));
     let req = client
-        .get(meta.tracker)
-        .query(&[("info_hash", urlencoding::encode(meta.info_hash.as_str()))])
-        .query(&[(
-            "peer_id",
-            urlencoding::encode(utils::bytes_to_hex_encoding(&peer_id).as_str()),
-        )])
+        .get(url)
         .query(&[("port", 6883)])
         .query(&[("uploaded", 0)])
         .query(&[("downloaded", 0)])
         .query(&[("left", meta.files[0].length)])
-        .query(&[("compact", 0)])
         .build()
         .unwrap();
-    println!("Req -> {:?}", req);
     let res = client.execute(req).unwrap().text().unwrap();
-    println!("Res -> {res}");
     Err(TorrentError::Unknown)
 }

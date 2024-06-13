@@ -17,8 +17,8 @@ const PIECE_LENGTH_KEY: [u8; 12] = [112, 105, 101, 99, 101, 32, 108, 101, 110, 1
 // "pieces" key
 const PIECES_KEY: [u8; 6] = [112, 105, 101, 99, 101, 115];
 
-pub fn decode(metainfo_buf: &[u8]) -> torrent::MetaInfo {
-    let mut decoder = Decoder::new(metainfo_buf);
+pub fn decode_metainfo(metainfo: &[u8]) -> torrent::MetaInfo {
+    let mut decoder = Decoder::new(metainfo);
     let mut info_hash: Option<String> = None;
     let mut tracker: Option<&str> = None;
     let mut file_name: Option<&str> = None;

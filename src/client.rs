@@ -18,7 +18,7 @@ impl Client {
         let mut file = fs::OpenOptions::new().read(true).open(file_path).unwrap();
         let mut buf: Vec<u8> = vec![];
         let _ = file.read_to_end(&mut buf).unwrap();
-        let metainfo = bencode::decode(buf.as_slice());
+        let metainfo = bencode::decode_metainfo(buf.as_slice());
         // println!("{:?}", metainfo);
         let torrent = torrent::add(metainfo).expect("error in adding torrent from metainfo");
         Err(ClientError::Unknown)

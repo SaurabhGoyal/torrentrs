@@ -2,9 +2,7 @@ use sha1::{Digest, Sha1};
 
 pub fn bytes_to_hex_encoding(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut current, b| {
-        print!("Current: {}, Byte - {}", current, b);
         current.push_str(format!("%{:02X}", b).as_str());
-        println!(", New: {}", current);
         current
     })
 }
@@ -15,6 +13,21 @@ pub fn sha1_hash(bytes: &[u8]) -> [u8; 20] {
     hasher.update(bytes);
     hash.copy_from_slice(&hasher.finalize()[..]);
     hash
+}
+
+fn _bytes_to_escaped_string(bytes: &[u8]) -> String {
+    std::str::from_utf8(
+        &bytes
+            .iter()
+            .map(|b| std::ascii::escape_default(*b).collect())
+            .reduce(|mut acc: Vec<u8>, part: Vec<u8>| {
+                acc.extend(part);
+                acc
+            })
+            .unwrap(),
+    )
+    .unwrap()
+    .to_string()
 }
 
 #[cfg(test)]
