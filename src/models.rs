@@ -38,5 +38,5 @@ pub struct Torrent {
 
 #[derive(Debug)]
 pub struct ClientConfig {
-    pub peer_id: [u8; PEER_ID_BYTE_LEN],
+    pub peer_id: String,
 }

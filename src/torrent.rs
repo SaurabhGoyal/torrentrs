@@ -1,6 +1,5 @@
 use crate::bencode;
 use crate::models;
-use crate::utils;
 
 #[derive(Debug)]
 pub enum TorrentError {
@@ -25,17 +24,16 @@ fn get_announce_response(
     url.set_query(Some(
         format!(
             "info_hash={}&peer_id={}",
-            meta.info_hash,
-            utils::bytes_to_hex_encoding(&client_config.peer_id)
+            meta.info_hash, client_config.peer_id,
         )
         .as_str(),
     ));
     let req = client
         .get(url)
-        .query(&[("port", 6883)])
+        .query(&[("port", 12457)])
         .query(&[("uploaded", 0)])
         .query(&[("downloaded", 0)])
-        .query(&[("left", meta.files[0].length)])
+        .query(&[("left", meta.pieces.iter().map(|p| p.length).sum::<u64>())])
         .build()
         .unwrap();
     let res = client.execute(req).unwrap().bytes().unwrap();

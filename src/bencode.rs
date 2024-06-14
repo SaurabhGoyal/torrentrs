@@ -1,36 +1,42 @@
 use crate::models;
 use crate::utils;
 use std::str;
+use std::vec;
 
 use bendy::decoding::{self, Decoder, Object};
 
 // "announce" key
-const ANNOUNCE_KEY: [u8; 8] = [97, 110, 110, 111, 117, 110, 99, 101];
+const ANNOUNCE_KEY: &[u8] = "announce".as_bytes();
+// "announce-list" key
+const ANNOUNCE_LIST_KEY: &[u8] = "announce-list".as_bytes();
 // "info" key
-const INFO_KEY: [u8; 4] = [105, 110, 102, 111];
+const INFO_KEY: &[u8] = "info".as_bytes();
 // "name" key
-const NAME_KEY: [u8; 4] = [110, 97, 109, 101];
+const NAME_KEY: &[u8] = "name".as_bytes();
 // "length" key
-const LENGTH_KEY: [u8; 6] = [108, 101, 110, 103, 116, 104];
+const LENGTH_KEY: &[u8] = "length".as_bytes();
+// "files" key
+const FILES_KEY: &[u8] = "files".as_bytes();
 // "piece length" key
-const PIECE_LENGTH_KEY: [u8; 12] = [112, 105, 101, 99, 101, 32, 108, 101, 110, 103, 116, 104];
+const PIECE_LENGTH_KEY: &[u8] = "piece length".as_bytes();
 // "pieces" key
-const PIECES_KEY: [u8; 6] = [112, 105, 101, 99, 101, 115];
+const PIECES_KEY: &[u8] = "pieces".as_bytes();
 // "peers" key
-const PEERS_KEY: [u8; 5] = [112, 101, 101, 114, 115];
-// "peer id" key
-const PEER_ID_KEY: [u8; 7] = [112, 101, 101, 114, 32, 105, 100];
+const PEERS_KEY: &[u8] = "peers".as_bytes();
+// "peer_id" key
+const PEER_ID_KEY: &[u8] = "peer_id".as_bytes();
 // "ip" key
-const IP_KEY: [u8; 2] = [105, 112];
+const IP_KEY: &[u8] = "ip".as_bytes();
 // "port" key
-const PORT_KEY: [u8; 4] = [112, 111, 114, 116];
+const PORT_KEY: &[u8] = "port".as_bytes();
 
 pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     let mut decoder = Decoder::new(metainfo);
     let mut info_hash: Option<String> = None;
     let mut tracker: Option<&str> = None;
-    let mut file_name: Option<&str> = None;
-    let mut file_length: Option<u64> = None;
+    let mut primary_file_name: Option<&str> = None;
+    let mut primary_file_length: Option<u64> = None;
+    let mut files = vec![];
     let mut piece_length: Option<u64> = None;
     let mut piece_hashes: Vec<[u8; models::PIECE_HASH_BYTE_LEN]> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut metainfo_object))) = decoder.next_object() {
@@ -42,15 +48,45 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
             }
             if key == INFO_KEY {
                 if let Object::Dict(mut value) = value {
-                    while let Ok(Some((key, value))) = value.next_pair() {
+                    while let Ok(Some((key, mut value))) = value.next_pair() {
                         if key == NAME_KEY {
                             if let Object::Bytes(value) = value {
-                                file_name = Some(str::from_utf8(value).unwrap());
+                                primary_file_name = Some(str::from_utf8(value).unwrap());
                             }
                         }
                         if key == LENGTH_KEY {
                             if let Object::Integer(value) = value {
-                                file_length = Some(value.parse::<u64>().unwrap());
+                                primary_file_length = Some(value.parse::<u64>().unwrap());
+                            }
+                        }
+                        if key == FILES_KEY {
+                            if let Object::List(ref mut files_object) = value {
+                                while let Ok(Some(Object::Dict(mut file_object))) =
+                                    files_object.next_object()
+                                {
+                                    let mut file_name = None;
+                                    let mut file_length = None;
+                                    while let Ok(Some((key, value))) = file_object.next_pair() {
+                                        if key == NAME_KEY {
+                                            if let Object::Bytes(value) = value {
+                                                file_name = Some(str::from_utf8(value).unwrap());
+                                            }
+                                        }
+                                        if key == LENGTH_KEY {
+                                            if let Object::Integer(value) = value {
+                                                file_length = Some(value.parse::<u64>().unwrap());
+                                            }
+                                        }
+                                    }
+                                    if let (Some(file_name), Some(file_length)) =
+                                        (file_name, file_length)
+                                    {
+                                        files.push(models::File {
+                                            name: file_name.to_string(),
+                                            length: file_length,
+                                        });
+                                    }
+                                }
                             }
                         }
                         if key == PIECE_LENGTH_KEY {
@@ -79,12 +115,17 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
             }
         }
     }
+    if files.is_empty() {
+        if let (Some(file_name), Some(file_length)) = (primary_file_name, primary_file_length) {
+            files.push(models::File {
+                name: file_name.to_string(),
+                length: file_length,
+            });
+        }
+    }
     models::MetaInfo {
         tracker: tracker.unwrap().to_string(),
-        files: vec![models::File {
-            name: file_name.unwrap().to_string(),
-            length: file_length.unwrap(),
-        }],
+        files,
         pieces: piece_hashes
             .into_iter()
             .map(|hash| models::Piece {
