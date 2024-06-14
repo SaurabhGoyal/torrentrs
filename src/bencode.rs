@@ -37,7 +37,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     let mut primary_file_name: Option<&str> = None;
     let mut primary_file_length: Option<u64> = None;
     let mut files = vec![];
-    let mut piece_length: Option<u64> = None;
+    let mut piece_length: Option<u32> = None;
     let mut piece_hashes: Vec<[u8; models::PIECE_HASH_BYTE_LEN]> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut metainfo_object))) = decoder.next_object() {
         while let Ok(Some((key, value))) = metainfo_object.next_pair() {
@@ -91,7 +91,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
                         }
                         if key == PIECE_LENGTH_KEY {
                             if let Object::Integer(value) = value {
-                                piece_length = Some(value.parse::<u64>().unwrap());
+                                piece_length = Some(value.parse::<u32>().unwrap());
                             }
                         }
                         if key == PIECES_KEY {

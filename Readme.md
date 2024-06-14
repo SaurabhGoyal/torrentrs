@@ -5,6 +5,21 @@ A bittorrent client implementation. Why torrent client?
 - decentralised
 - an essential app
 
+# Design
+- Torrents -
+  - Entry points, 1st class citizen. Has (info_hash, files, pieces, peers).
+  - Consists of pieces that need to be downloaded from peers.
+- Peers -
+  - Needed to get torrents. has (ip, port).
+  - A pper connection is made using TCP is 1:1 with peer.
+  - Although connection is torrent agnostic, a handshake is needed per torrent file before exchanging any peer protocol messages, hence I would treat connection to be mapped 1:1 with a torrent.
+  - So Torrent <1:N> Peer <1:1> Connection.
+- Pieces -
+  - Made of (index, hash, length)
+  - Available at zero or more peers.
+  - So Torrent <1:M> Piece <1:L> Peer/Connection.
+  - One piece can be available at multiple peers.
+
 # Implementation
 Single torrent level
 - [x] Read torrent file (metainfo)

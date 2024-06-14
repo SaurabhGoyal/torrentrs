@@ -49,12 +49,22 @@ impl Client {
             let port = p.port;
             let info_hash = tor.meta.info_hash.clone();
             let peer_id = self.config.peer_id.clone();
+            let pieces: Vec<(usize, u32)> = tor
+                .meta
+                .pieces
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, p.length))
+                .collect();
             handles.push(thread::spawn(move || {
                 if let Ok(mut peer_conn) =
                     peer::PeerConnection::new(ip.as_str(), port, &info_hash, &peer_id)
                 {
                     peer_conn.mark_host_interested(true).unwrap();
-                    // TODO: Add further file download logic.
+                    for (i, l) in pieces.iter().take(2) {
+                        peer_conn.request(*i as u32, 0, *l).unwrap();
+                        peer_conn.cancel(*i as u32, 0, *l).unwrap();
+                    }
                 }
             }));
         }

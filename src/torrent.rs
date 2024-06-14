@@ -33,7 +33,7 @@ fn get_announce_response(
         .query(&[("port", 12457)])
         .query(&[("uploaded", 0)])
         .query(&[("downloaded", 0)])
-        .query(&[("left", meta.pieces.iter().map(|p| p.length).sum::<u64>())])
+        .query(&[("left", meta.pieces.iter().map(|p| p.length).sum::<u32>())])
         .build()
         .unwrap();
     let res = client.execute(req).unwrap().bytes().unwrap();

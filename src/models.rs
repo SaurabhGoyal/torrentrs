@@ -13,7 +13,7 @@ pub struct File {
 #[derive(Debug)]
 pub struct Piece {
     pub hash: [u8; PIECE_HASH_BYTE_LEN],
-    pub length: u64,
+    pub length: u32,
 }
 
 #[derive(Debug)]

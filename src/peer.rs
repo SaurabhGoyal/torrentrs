@@ -11,6 +11,8 @@ const HANSHAKE_RESTRICTED: &[u8] = &[0; 8];
 pub trait Peer {
     fn mark_host_interested(&mut self, interested: bool) -> Result<(), io::Error>;
     fn mark_peer_choked(&mut self, choked: bool) -> Result<(), io::Error>;
+    fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error>;
+    fn cancel(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error>;
 }
 
 #[derive(Debug)]
@@ -76,6 +78,37 @@ impl Peer for PeerConnection {
     fn mark_peer_choked(&mut self, choked: bool) -> Result<(), io::Error> {
         let _ = self.conn.write(&[0, 0, 0, 1, if choked { 0 } else { 1 }])?;
         self.peer.choked = choked;
+        Ok(())
+    }
+
+    fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
+        let msg = [
+            &[0, 0, 1, 3],
+            &6_u32.to_be_bytes()[..],
+            &index.to_be_bytes()[..],
+            &begin.to_be_bytes()[..],
+            &length.to_be_bytes()[..],
+        ]
+        .concat();
+        let _ = self.conn.write(msg.as_slice())?;
+        println!("Piece with ({}, {}, {}) requested", index, begin, length);
+        Ok(())
+    }
+
+    fn cancel(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
+        let msg = [
+            &[0, 0, 1, 3],
+            &8_u32.to_be_bytes()[..],
+            &index.to_be_bytes()[..],
+            &begin.to_be_bytes()[..],
+            &length.to_be_bytes()[..],
+        ]
+        .concat();
+        let _ = self.conn.write(msg.as_slice())?;
+        println!(
+            "Request for piece with ({}, {}, {}) cancelled",
+            index, begin, length
+        );
         Ok(())
     }
 }
