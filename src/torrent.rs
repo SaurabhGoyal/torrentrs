@@ -6,19 +6,19 @@ pub enum TorrentError {
     Unknown,
 }
 
-pub fn add(
+pub async fn add(
     meta: models::MetaInfo,
     client_config: &models::ClientConfig,
 ) -> Result<models::Torrent, TorrentError> {
-    let peers = get_announce_response(&meta, client_config);
+    let peers = get_announce_response(&meta, client_config).await;
     Ok(models::Torrent { meta, peers })
 }
 
-fn get_announce_response(
+async fn get_announce_response(
     meta: &models::MetaInfo,
     client_config: &models::ClientConfig,
 ) -> Vec<models::Peer> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     // Workaround for issue with binary data - https://github.com/servo/rust-url/issues/219
     let mut url = reqwest::Url::parse(meta.tracker.as_str()).unwrap();
     url.set_query(Some(
@@ -36,6 +36,6 @@ fn get_announce_response(
         .query(&[("left", meta.pieces.iter().map(|p| p.length).sum::<u32>())])
         .build()
         .unwrap();
-    let res = client.execute(req).unwrap().bytes().unwrap();
+    let res = client.execute(req).await.unwrap().bytes().await.unwrap();
     bencode::decode_peers(res.as_ref())
 }

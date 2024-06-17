@@ -1,5 +1,8 @@
 use rand::RngCore;
-use std::{fs, io::Read, thread};
+use std::{
+    fs,
+    io::{self, Read},
+};
 
 use crate::{
     bencode, models,
@@ -29,7 +32,7 @@ impl Client {
         }
     }
 
-    pub fn add_torrent(&mut self, file_path: &str) -> Result<models::Torrent, ClientError> {
+    pub async fn add_torrent(&mut self, file_path: &str) -> Result<models::Torrent, ClientError> {
         // Read file
         let mut file = fs::OpenOptions::new().read(true).open(file_path).unwrap();
         let mut buf: Vec<u8> = vec![];
@@ -37,39 +40,38 @@ impl Client {
         // Parse metadata_info
         let metainfo = bencode::decode_metainfo(buf.as_slice());
         // Add torrent;
-        let tor =
-            torrent::add(metainfo, &self.config).expect("error in adding torrent from metainfo");
+        let tor = torrent::add(metainfo, &self.config)
+            .await
+            .expect("error in adding torrent from metainfo");
         Ok(tor)
     }
 
-    pub fn start_torrent(&mut self, tor: models::Torrent) -> Result<models::Torrent, ClientError> {
+    pub async fn start_torrent(
+        &mut self,
+        tor: models::Torrent,
+    ) -> Result<models::Torrent, io::Error> {
         let mut handles = vec![];
         for p in tor.peers.iter() {
             let ip = p.ip.clone();
             let port = p.port;
             let info_hash = tor.meta.info_hash.clone();
             let peer_id = self.config.peer_id.clone();
-            let pieces: Vec<(usize, u32)> = tor
-                .meta
-                .pieces
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (i, p.length))
-                .collect();
-            handles.push(thread::spawn(move || {
-                if let Ok(mut peer_conn) =
-                    peer::PeerConnection::new(ip.as_str(), port, &info_hash, &peer_id)
-                {
-                    peer_conn.mark_host_interested(true).unwrap();
-                    for (i, l) in pieces.iter().take(2) {
-                        peer_conn.request(*i as u32, 0, *l).unwrap();
-                        peer_conn.cancel(*i as u32, 0, *l).unwrap();
-                    }
+            // let pieces: Vec<(usize, u32)> = tor
+            //     .meta
+            //     .pieces
+            //     .iter()
+            //     .enumerate()
+            //     .map(|(i, p)| (i, p.length))
+            //     .collect();
+            handles.push(tokio::spawn(async move {
+                if let Ok(mut pc) = peer::PeerConnection::new(ip.as_str(), port).await {
+                    pc.handshake(&info_hash, &peer_id).await.unwrap();
+                    pc.mark_host_interested(true).await.unwrap();
                 }
             }));
         }
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
         Ok(tor)
     }
