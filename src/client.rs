@@ -2,9 +2,7 @@ use rand::RngCore;
 use std::{
     fs,
     io::{self, Read},
-    sync::{mpsc::channel, Arc, Mutex},
-    thread,
-    time::Duration,
+    sync::Arc,
 };
 
 use crate::{
@@ -55,7 +53,6 @@ impl Client {
         tor: models::TorrentInfo,
     ) -> Result<models::TorrentInfo, io::Error> {
         let mut handles = vec![];
-        let mut cmd_txs = vec![];
         let pieces: Vec<(u32, u32)> = tor
             .meta
             .pieces
@@ -66,20 +63,23 @@ impl Client {
         for p in tor.peers.iter() {
             let ip = p.ip.clone();
             let port = p.port;
-            let torrent_info_hash = tor.meta.info_hash.clone();
-            let client_peer_id = self.config.peer_id.clone();
-            let (cmd_tx, cmd_rx) = channel::<peer::PeerCommand>();
+            let torrent_info_hash = tor.meta.info_hash;
+            let client_peer_id = self.config.peer_id;
             if ip == "116.88.97.233" {
                 handles.push(tokio::spawn(async move {
                     let peer_obj = peer::Peer::new([0; 20], ip, port);
                     let peer_conn = peer_obj.connect()?;
-                    let peer_active_conn = peer_conn.activate(torrent_info_hash, client_peer_id)?;
+                    let peer_active_conn =
+                        peer_conn.activate(torrent_info_hash, client_peer_id, pieces.len())?;
+                    let peer_active_conn = Arc::new(peer_active_conn);
+                    let peer_active_conn_listener = peer_active_conn.clone();
+                    let listener_handle = tokio::spawn(async move {
+                        peer_active_conn_listener.start_listener()?;
+                        Ok::<(), io::Error>(())
+                    });
+                    listener_handle.await??;
                     Ok::<(), io::Error>(())
                 }));
-                cmd_tx
-                    .send(peer::PeerCommand::PieceRequest(0, 0, pieces[0].1))
-                    .unwrap();
-                cmd_txs.push(cmd_tx);
                 break;
             }
         }
