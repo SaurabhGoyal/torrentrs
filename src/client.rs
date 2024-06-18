@@ -2,6 +2,9 @@ use rand::RngCore;
 use std::{
     fs,
     io::{self, Read},
+    sync::{mpsc::channel, Arc, Mutex},
+    thread,
+    time::Duration,
 };
 
 use crate::{
@@ -26,13 +29,14 @@ impl Client {
         clinet_info.copy_from_slice("RS0010".as_bytes());
         rand::thread_rng().fill_bytes(rest);
         Client {
-            config: models::ClientConfig {
-                peer_id: utils::bytes_to_hex_encoding(&peer_id),
-            },
+            config: models::ClientConfig { peer_id },
         }
     }
 
-    pub async fn add_torrent(&mut self, file_path: &str) -> Result<models::Torrent, ClientError> {
+    pub async fn add_torrent(
+        &mut self,
+        file_path: &str,
+    ) -> Result<models::TorrentInfo, ClientError> {
         // Read file
         let mut file = fs::OpenOptions::new().read(true).open(file_path).unwrap();
         let mut buf: Vec<u8> = vec![];
@@ -48,30 +52,41 @@ impl Client {
 
     pub async fn start_torrent(
         &mut self,
-        tor: models::Torrent,
-    ) -> Result<models::Torrent, io::Error> {
+        tor: models::TorrentInfo,
+    ) -> Result<models::TorrentInfo, io::Error> {
         let mut handles = vec![];
+        let mut cmd_txs = vec![];
+        let pieces: Vec<(u32, u32)> = tor
+            .meta
+            .pieces
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, p.length))
+            .collect();
         for p in tor.peers.iter() {
             let ip = p.ip.clone();
             let port = p.port;
-            let info_hash = tor.meta.info_hash.clone();
-            let peer_id = self.config.peer_id.clone();
-            // let pieces: Vec<(usize, u32)> = tor
-            //     .meta
-            //     .pieces
-            //     .iter()
-            //     .enumerate()
-            //     .map(|(i, p)| (i, p.length))
-            //     .collect();
-            handles.push(tokio::spawn(async move {
-                if let Ok(mut pc) = peer::PeerConnection::new(ip.as_str(), port).await {
-                    pc.handshake(&info_hash, &peer_id).await.unwrap();
-                    pc.mark_host_interested(true).await.unwrap();
-                }
-            }));
+            let torrent_info_hash = tor.meta.info_hash.clone();
+            let client_peer_id = self.config.peer_id.clone();
+            let (cmd_tx, cmd_rx) = channel::<peer::PeerCommand>();
+            if ip == "116.88.97.233" {
+                handles.push(tokio::spawn(async move {
+                    let peer_obj = peer::Peer::new([0; 20], ip, port);
+                    let peer_conn = peer_obj.connect()?;
+                    let peer_active_conn = peer_conn.activate(torrent_info_hash, client_peer_id)?;
+                    Ok::<(), io::Error>(())
+                }));
+                cmd_tx
+                    .send(peer::PeerCommand::PieceRequest(0, 0, pieces[0].1))
+                    .unwrap();
+                cmd_txs.push(cmd_tx);
+                break;
+            }
         }
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(e) = handle.await {
+                println!("Err - {e}");
+            }
         }
         Ok(tor)
     }

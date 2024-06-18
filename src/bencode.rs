@@ -32,7 +32,7 @@ const PORT_KEY: &[u8] = "port".as_bytes();
 
 pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     let mut decoder = Decoder::new(metainfo);
-    let mut info_hash: Option<String> = None;
+    let mut info_hash: Option<[u8; models::INFO_HASH_BYTE_LEN]> = None;
     let mut tracker: Option<&str> = None;
     let mut primary_file_name: Option<&str> = None;
     let mut primary_file_length: Option<u64> = None;
@@ -81,7 +81,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
                                     if let (Some(file_name), Some(file_length)) =
                                         (file_name, file_length)
                                     {
-                                        files.push(models::File {
+                                        files.push(models::FileInfo {
                                             name: file_name.to_string(),
                                             length: file_length,
                                         });
@@ -108,16 +108,14 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
                             }
                         }
                     }
-                    info_hash = Some(utils::bytes_to_hex_encoding(&utils::sha1_hash(
-                        value.into_raw().unwrap(),
-                    )));
+                    info_hash = Some(utils::sha1_hash(value.into_raw().unwrap()));
                 }
             }
         }
     }
     if files.is_empty() {
         if let (Some(file_name), Some(file_length)) = (primary_file_name, primary_file_length) {
-            files.push(models::File {
+            files.push(models::FileInfo {
                 name: file_name.to_string(),
                 length: file_length,
             });
@@ -128,7 +126,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
         files,
         pieces: piece_hashes
             .into_iter()
-            .map(|hash| models::Piece {
+            .map(|hash| models::PieceInfo {
                 hash,
                 length: piece_length.unwrap(),
             })
@@ -137,9 +135,9 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     }
 }
 
-pub fn decode_peers(announce_response: &[u8]) -> Vec<models::Peer> {
+pub fn decode_peers(announce_response: &[u8]) -> Vec<models::PeerInfo> {
     let mut decoder = Decoder::new(announce_response);
-    let mut peers: Vec<models::Peer> = vec![];
+    let mut peers: Vec<models::PeerInfo> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut announce_object))) = decoder.next_object() {
         while let Ok(Some((key, peers_object))) = announce_object.next_pair() {
             if key == PEERS_KEY {
@@ -162,7 +160,7 @@ pub fn decode_peers(announce_response: &[u8]) -> Vec<models::Peer> {
                                     }
                                 }
                             }
-                            peers.push(models::Peer {
+                            peers.push(models::PeerInfo {
                                 ip: ip.unwrap(),
                                 port: port.unwrap(),
                             });
@@ -171,7 +169,7 @@ pub fn decode_peers(announce_response: &[u8]) -> Vec<models::Peer> {
                     Object::Bytes(peers_binary_object) => {
                         let mut offset = 0;
                         while offset < peers_binary_object.len() {
-                            peers.push(models::Peer {
+                            peers.push(models::PeerInfo {
                                 ip: peers_binary_object[offset..offset + 4]
                                     .iter()
                                     .map(|b| format!("{b}"))

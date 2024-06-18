@@ -1,122 +1,100 @@
 use std::{
     io::{self, Read, Write},
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
+    net::{IpAddr, SocketAddr, TcpStream},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use crate::models;
+
 const HANSHAKE_PSTR_LEN: &[u8] = &[19];
-const HANSHAKE_PSTR: &[u8] = "BitTorrent Protocol".as_bytes();
+const HANSHAKE_PSTR: &[u8] = "BitTorrent protocol".as_bytes();
 const HANSHAKE_RESTRICTED: &[u8] = &[0; 8];
 
-pub trait Peer {
-    async fn handshake(
-        &mut self,
-        torrent_info_hash: &str,
-        client_peer_id: &str,
-    ) -> Result<(), io::Error>;
-    async fn mark_host_interested(&mut self, interested: bool) -> Result<(), io::Error>;
-    async fn mark_peer_choked(&mut self, choked: bool) -> Result<(), io::Error>;
-    async fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error>;
-    async fn cancel(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error>;
+#[derive(Debug)]
+pub struct Peer {
+    id: [u8; models::PEER_ID_BYTE_LEN],
+    ip: String,
+    port: u16,
+}
+
+#[derive(Debug)]
+pub struct PeerConnection {
+    peer: Peer,
+    stream: TcpStream,
 }
 
 #[derive(Debug)]
 pub struct PeerClientState {
-    handshake_confirmed: bool,
     choked: bool,
     interested: bool,
 }
 
 #[derive(Debug)]
-pub struct PeerConnection {
-    conn: TcpStream,
-    host: PeerClientState,
-    peer: PeerClientState,
+pub enum PeerCommand {
+    PeerChoke(bool),
+    PieceRequest(u32, u32, u32),
+    PieceCancel(u32, u32, u32),
+}
+
+#[derive(Debug)]
+pub struct PeerActiveConnection {
+    peer: Peer,
+    stream: Arc<Mutex<TcpStream>>,
+    host_state: Arc<Mutex<PeerClientState>>,
+    peer_state: Arc<Mutex<PeerClientState>>,
+    torrent_info_hash: [u8; models::INFO_HASH_BYTE_LEN],
+    client_peer_id: [u8; models::PEER_ID_BYTE_LEN],
+}
+
+impl Peer {
+    pub fn new(id: [u8; models::PEER_ID_BYTE_LEN], ip: String, port: u16) -> Self {
+        Self { id, ip, port }
+    }
+
+    pub fn connect(self) -> Result<PeerConnection, io::Error> {
+        let stream = TcpStream::connect_timeout(
+            &SocketAddr::new(self.ip.parse::<IpAddr>().unwrap(), self.port),
+            Duration::from_secs(180),
+        )?;
+        Ok(PeerConnection { peer: self, stream })
+    }
 }
 
 impl PeerConnection {
-    pub async fn new(ip: &str, port: u16) -> Result<PeerConnection, io::Error> {
-        let conn = TcpStream::connect_timeout(
-            &SocketAddr::new(ip.parse::<IpAddr>().unwrap(), port),
-            Duration::from_secs(10),
-        )?;
-        Ok(PeerConnection {
-            conn,
-            host: PeerClientState {
-                handshake_confirmed: false,
-                choked: true,
-                interested: false,
-            },
-            peer: PeerClientState {
-                handshake_confirmed: false,
-                choked: false,
-                interested: false,
-            },
-        })
-    }
-}
-
-impl Peer for PeerConnection {
-    async fn mark_host_interested(&mut self, interested: bool) -> Result<(), io::Error> {
-        let _ = self
-            .conn
-            .write(&[0, 0, 0, 1, if interested { 2 } else { 3 }])?;
-        self.host.interested = interested;
-        println!("Peer interest acked: {}", self.conn.peer_addr().unwrap());
-        Ok(())
-    }
-
-    async fn mark_peer_choked(&mut self, choked: bool) -> Result<(), io::Error> {
-        let _ = self.conn.write(&[0, 0, 0, 1, if choked { 0 } else { 1 }])?;
-        self.peer.choked = choked;
-        Ok(())
-    }
-
-    async fn request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
-        let msg = [
-            &[0, 0, 1, 3],
-            &6_u32.to_be_bytes()[..],
-            &index.to_be_bytes()[..],
-            &begin.to_be_bytes()[..],
-            &length.to_be_bytes()[..],
-        ]
-        .concat();
-        let _ = self.conn.write(msg.as_slice())?;
-        println!("Piece with ({}, {}, {}) requested", index, begin, length);
-        Ok(())
-    }
-
-    async fn cancel(&mut self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
-        let msg = [
-            &[0, 0, 1, 3],
-            &8_u32.to_be_bytes()[..],
-            &index.to_be_bytes()[..],
-            &begin.to_be_bytes()[..],
-            &length.to_be_bytes()[..],
-        ]
-        .concat();
-        let _ = self.conn.write(msg.as_slice())?;
-        println!(
-            "Request for piece with ({}, {}, {}) cancelled",
-            index, begin, length
-        );
-        Ok(())
-    }
-
-    async fn handshake(
-        &mut self,
-        torrent_info_hash: &str,
-        client_peer_id: &str,
-    ) -> Result<(), io::Error> {
-        let handshake_msg = [
+    pub fn activate(
+        mut self,
+        torrent_info_hash: [u8; models::INFO_HASH_BYTE_LEN],
+        client_peer_id: [u8; models::PEER_ID_BYTE_LEN],
+    ) -> Result<PeerActiveConnection, io::Error> {
+        let mut handshake_msg = [
             HANSHAKE_PSTR_LEN,
             HANSHAKE_PSTR,
             HANSHAKE_RESTRICTED,
-            torrent_info_hash.as_bytes(),
-            client_peer_id.as_bytes(),
+            torrent_info_hash.as_slice(),
+            client_peer_id.as_slice(),
         ]
         .concat();
-        let _ = self.conn.write(handshake_msg.as_slice())?;
-        Ok(())
+        // Send handshake
+        let _ = self.stream.write(handshake_msg.as_slice())?;
+        // Receive handshake ack
+        let _ = self.stream.read(handshake_msg.as_mut_slice())?;
+        // Verify handshake
+        assert_eq!(torrent_info_hash, handshake_msg[28..48]);
+        let _ = self.stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8])?;
+        Ok(PeerActiveConnection {
+            peer: self.peer,
+            torrent_info_hash,
+            client_peer_id,
+            stream: Arc::new(Mutex::new(self.stream)),
+            host_state: Arc::new(Mutex::new(PeerClientState {
+                choked: true,
+                interested: true,
+            })),
+            peer_state: Arc::new(Mutex::new(PeerClientState {
+                choked: false,
+                interested: false,
+            })),
+        })
     }
 }
