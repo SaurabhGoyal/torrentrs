@@ -2,7 +2,7 @@ use rand::RngCore;
 use std::{
     fs,
     io::{self, Read},
-    sync::Arc,
+    sync::{mpsc::channel, Arc},
 };
 
 use crate::{
@@ -53,13 +53,8 @@ impl Client {
         tor: models::TorrentInfo,
     ) -> Result<models::TorrentInfo, io::Error> {
         let mut handles = vec![];
-        let pieces: Vec<(u32, u32)> = tor
-            .meta
-            .pieces
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i as u32, p.length))
-            .collect();
+        let pieces_count = tor.meta.pieces.len();
+        let (cmd_tx, cmd_rx) = channel::<peer::PeerCommand>();
         for p in tor.peers.iter() {
             let ip = p.ip.clone();
             let port = p.port;
@@ -70,19 +65,40 @@ impl Client {
                     let peer_obj = peer::Peer::new([0; 20], ip, port);
                     let peer_conn = peer_obj.connect()?;
                     let peer_active_conn =
-                        peer_conn.activate(torrent_info_hash, client_peer_id, pieces.len())?;
+                        peer_conn.activate(torrent_info_hash, client_peer_id, pieces_count)?;
                     let peer_active_conn = Arc::new(peer_active_conn);
                     let peer_active_conn_listener = peer_active_conn.clone();
                     let listener_handle = tokio::spawn(async move {
                         peer_active_conn_listener.start_listener()?;
                         Ok::<(), io::Error>(())
                     });
+                    let peer_active_conn_writer = peer_active_conn.clone();
+                    let writer_handle = tokio::spawn(async move {
+                        peer_active_conn_writer.start_writer(cmd_rx)?;
+                        Ok::<(), io::Error>(())
+                    });
+
                     listener_handle.await??;
+                    writer_handle.await??;
                     Ok::<(), io::Error>(())
                 }));
                 break;
             }
         }
+        for index in 0..5 {
+            let piece_length = tor.meta.pieces[index as usize].length;
+            cmd_tx
+                .send(peer::PeerCommand::PeerRequest(index, 0, piece_length >> 1))
+                .unwrap();
+            cmd_tx
+                .send(peer::PeerCommand::PeerRequest(
+                    index,
+                    piece_length >> 1,
+                    piece_length,
+                ))
+                .unwrap();
+        }
+
         for handle in handles {
             if let Err(e) = handle.await {
                 println!("Err - {e}");
