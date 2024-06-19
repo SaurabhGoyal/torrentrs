@@ -2,19 +2,11 @@ use rand::RngCore;
 use std::{
     fs,
     io::{self, Read},
-    sync::{mpsc::channel, Arc},
+    ops::Deref,
+    sync::{mpsc::channel, Arc, Mutex},
 };
 
-use crate::{
-    bencode, models,
-    peer::{self, Peer},
-    torrent, utils,
-};
-
-#[derive(Debug)]
-pub enum ClientError {
-    Unknown,
-}
+use crate::{bencode, models, peer, torrent, writer};
 
 pub struct Client {
     config: models::ClientConfig,
@@ -31,14 +23,11 @@ impl Client {
         }
     }
 
-    pub async fn add_torrent(
-        &mut self,
-        file_path: &str,
-    ) -> Result<models::TorrentInfo, ClientError> {
+    pub async fn add_torrent(&mut self, file_path: &str) -> Result<models::TorrentInfo, io::Error> {
         // Read file
-        let mut file = fs::OpenOptions::new().read(true).open(file_path).unwrap();
+        let mut file = fs::OpenOptions::new().read(true).open(file_path)?;
         let mut buf: Vec<u8> = vec![];
-        file.read_to_end(&mut buf).unwrap();
+        file.read_to_end(&mut buf)?;
         // Parse metadata_info
         let metainfo = bencode::decode_metainfo(buf.as_slice());
         // Add torrent;
@@ -51,8 +40,16 @@ impl Client {
     pub async fn start_torrent(
         &mut self,
         tor: models::TorrentInfo,
+        dest_path: &str,
     ) -> Result<models::TorrentInfo, io::Error> {
         let mut handles = vec![];
+        let (mut data_writer, data_tx) =
+            writer::DataWriter::new(dest_path, &tor.meta.files, &tor.meta.pieces)?;
+        let data_tx = Arc::new(Mutex::new(data_tx));
+        handles.push(tokio::spawn(async move {
+            data_writer.start()?;
+            Ok::<(), io::Error>(())
+        }));
         let pieces_count = tor.meta.pieces.len();
         let (cmd_tx, cmd_rx) = channel::<peer::PeerCommand>();
         for p in tor.peers.iter() {
@@ -60,26 +57,14 @@ impl Client {
             let port = p.port;
             let torrent_info_hash = tor.meta.info_hash;
             let client_peer_id = self.config.peer_id;
+            let data_tx = data_tx.clone();
             if ip == "116.88.97.233" {
                 handles.push(tokio::spawn(async move {
-                    let peer_obj = peer::Peer::new([0; 20], ip, port);
-                    let peer_conn = peer_obj.connect()?;
-                    let peer_active_conn =
-                        peer_conn.activate(torrent_info_hash, client_peer_id, pieces_count)?;
-                    let peer_active_conn = Arc::new(peer_active_conn);
-                    let peer_active_conn_listener = peer_active_conn.clone();
-                    let listener_handle = tokio::spawn(async move {
-                        peer_active_conn_listener.start_listener()?;
-                        Ok::<(), io::Error>(())
-                    });
-                    let peer_active_conn_writer = peer_active_conn.clone();
-                    let writer_handle = tokio::spawn(async move {
-                        peer_active_conn_writer.start_writer(cmd_rx)?;
-                        Ok::<(), io::Error>(())
-                    });
-
-                    listener_handle.await??;
-                    writer_handle.await??;
+                    peer::Peer::new([0; 20], ip, port)
+                        .connect()?
+                        .activate(torrent_info_hash, client_peer_id, pieces_count)?
+                        .start_exchange(cmd_rx, data_tx)
+                        .await?;
                     Ok::<(), io::Error>(())
                 }));
                 break;
@@ -90,13 +75,14 @@ impl Client {
             cmd_tx
                 .send(peer::PeerCommand::PeerRequest(index, 0, piece_length >> 1))
                 .unwrap();
-            cmd_tx
-                .send(peer::PeerCommand::PeerRequest(
-                    index,
-                    piece_length >> 1,
-                    piece_length,
-                ))
-                .unwrap();
+            // TODO: Check why only half size block calls are working.
+            // cmd_tx
+            //     .send(peer::PeerCommand::PeerRequest(
+            //         index,
+            //         piece_length >> 1,
+            //         piece_length,
+            //     ))
+            //     .unwrap();
         }
 
         for handle in handles {

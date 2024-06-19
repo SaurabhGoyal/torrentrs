@@ -82,7 +82,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
                                         (file_name, file_length)
                                     {
                                         files.push(models::FileInfo {
-                                            name: file_name.to_string(),
+                                            relative_path: file_name.to_string(),
                                             length: file_length,
                                         });
                                     }
@@ -116,7 +116,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     if files.is_empty() {
         if let (Some(file_name), Some(file_length)) = (primary_file_name, primary_file_length) {
             files.push(models::FileInfo {
-                name: file_name.to_string(),
+                relative_path: file_name.to_string(),
                 length: file_length,
             });
         }

@@ -38,6 +38,7 @@ Client level
 Peer Connection
 - [ ] Event loop / async for better performance.
 - [ ] Piece request pipelining at TCP as well as application level.
+- [ ] DHT.
 
 Server level
 - [ ] Acting as a peer that can serve data.

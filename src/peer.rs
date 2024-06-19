@@ -1,12 +1,15 @@
 use std::{
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
-    sync::{mpsc::Receiver, Arc, Mutex},
+    sync::{
+        mpsc::{Receiver, Sender},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
 
-use crate::models;
+use crate::{models, writer};
 
 const HANSHAKE_PSTR_LEN: &[u8] = &[19];
 const HANSHAKE_PSTR: &[u8] = "BitTorrent protocol".as_bytes();
@@ -108,7 +111,28 @@ impl PeerConnection {
 }
 
 impl PeerActiveConnection {
-    pub fn start_listener(&self) -> Result<(), io::Error> {
+    pub async fn start_exchange(
+        self,
+        cmd_rx: Receiver<PeerCommand>,
+        data_tx: Arc<Mutex<Sender<writer::Data>>>,
+    ) -> Result<Arc<Self>, io::Error> {
+        let self_arc = Arc::new(self);
+        let listener = self_arc.clone();
+        let listener_handle = tokio::spawn(async move {
+            listener.start_listener(data_tx)?;
+            Ok::<(), io::Error>(())
+        });
+        let writer = self_arc.clone();
+        let writer_handle = tokio::spawn(async move {
+            writer.start_writer(cmd_rx)?;
+            Ok::<(), io::Error>(())
+        });
+        listener_handle.await??;
+        writer_handle.await??;
+        Ok(self_arc)
+    }
+
+    fn start_listener(&self, data_tx: Arc<Mutex<Sender<writer::Data>>>) -> Result<(), io::Error> {
         let mut len_buf = [0_u8; 4];
         let max_size = 1 << 16;
         self.log("listener started");
@@ -149,6 +173,18 @@ impl PeerActiveConnection {
                             }
                             self.set_peer_bitfield(bitfield);
                         }
+                        7_u8 => {
+                            let mut index_buf = [0_u8; 4];
+                            index_buf.copy_from_slice(&data_buf[1..5]);
+                            let index = u32::from_be_bytes(index_buf) as usize;
+                            index_buf.copy_from_slice(&data_buf[5..9]);
+                            let _begin = u32::from_be_bytes(index_buf) as usize;
+                            data_tx
+                                .lock()
+                                .unwrap()
+                                .send(writer::Data::Piece(index, data_buf[9..].to_owned()))
+                                .unwrap();
+                        }
                         _ => {}
                     };
                 }
@@ -158,7 +194,7 @@ impl PeerActiveConnection {
         Ok(())
     }
 
-    pub fn start_writer(&self, cmd_rx: Receiver<PeerCommand>) -> Result<(), io::Error> {
+    fn start_writer(&self, cmd_rx: Receiver<PeerCommand>) -> Result<(), io::Error> {
         self.log("writer started");
         while let Ok(cmd) = cmd_rx.recv() {
             self.log(format!("received cmd: [{:?}]", cmd).as_str());

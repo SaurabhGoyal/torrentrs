@@ -3,11 +3,9 @@ pub const INFO_HASH_BYTE_LEN: usize = 20;
 pub const PIECE_HASH_BYTE_LEN: usize = 20;
 pub const PEER_ID_BYTE_LEN: usize = 20;
 
-type Id = u64;
-
 #[derive(Debug)]
 pub struct FileInfo {
-    pub name: String,
+    pub relative_path: String,
     pub length: u64,
 }
 

@@ -6,6 +6,7 @@ mod models;
 mod peer;
 mod torrent;
 mod utils;
+mod writer;
 
 #[tokio::main]
 async fn main() {
@@ -17,7 +18,7 @@ async fn main() {
             .await
             .expect("error in adding torrent file path");
         println!("{:?}", tor.peers);
-        client.start_torrent(tor).await.unwrap();
+        client.start_torrent(tor, &args[2]).await.unwrap();
     });
     handle.await.unwrap();
 }
