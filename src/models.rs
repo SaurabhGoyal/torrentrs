@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 // Piece hash byte length
 pub const INFO_HASH_BYTE_LEN: usize = 20;
 pub const PIECE_HASH_BYTE_LEN: usize = 20;
@@ -5,7 +7,7 @@ pub const PEER_ID_BYTE_LEN: usize = 20;
 
 #[derive(Debug)]
 pub struct FileInfo {
-    pub relative_path: String,
+    pub relative_path: PathBuf,
     pub length: u64,
 }
 

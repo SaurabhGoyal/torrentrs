@@ -1,6 +1,8 @@
 use crate::models;
 use crate::utils;
+use std::path::PathBuf;
 use std::str;
+use std::str::FromStr;
 use std::vec;
 
 use bendy::decoding::{self, Decoder, Object};
@@ -13,6 +15,8 @@ const ANNOUNCE_LIST_KEY: &[u8] = "announce-list".as_bytes();
 const INFO_KEY: &[u8] = "info".as_bytes();
 // "name" key
 const NAME_KEY: &[u8] = "name".as_bytes();
+// "path" key
+const PATH_KEY: &[u8] = "path".as_bytes();
 // "length" key
 const LENGTH_KEY: &[u8] = "length".as_bytes();
 // "files" key
@@ -34,68 +38,67 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
     let mut decoder = Decoder::new(metainfo);
     let mut info_hash: Option<[u8; models::INFO_HASH_BYTE_LEN]> = None;
     let mut tracker: Option<&str> = None;
-    let mut primary_file_name: Option<&str> = None;
+    let mut primary_file_name: Option<PathBuf> = None;
     let mut primary_file_length: Option<u64> = None;
     let mut files = vec![];
     let mut piece_length: Option<u32> = None;
     let mut piece_hashes: Vec<[u8; models::PIECE_HASH_BYTE_LEN]> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut metainfo_object))) = decoder.next_object() {
         while let Ok(Some((key, value))) = metainfo_object.next_pair() {
-            if key == ANNOUNCE_KEY {
-                if let Object::Bytes(value) = value {
+            match (key, value) {
+                (ANNOUNCE_KEY, Object::Bytes(value)) => {
                     tracker = Some(str::from_utf8(value).unwrap());
                 }
-            }
-            if key == INFO_KEY {
-                if let Object::Dict(mut value) = value {
+                (INFO_KEY, Object::Dict(mut value)) => {
                     while let Ok(Some((key, mut value))) = value.next_pair() {
-                        if key == NAME_KEY {
-                            if let Object::Bytes(value) = value {
-                                primary_file_name = Some(str::from_utf8(value).unwrap());
+                        match (key, value) {
+                            (NAME_KEY, Object::Bytes(value)) => {
+                                primary_file_name = Some(
+                                    PathBuf::from_str(str::from_utf8(value).unwrap()).unwrap(),
+                                );
                             }
-                        }
-                        if key == LENGTH_KEY {
-                            if let Object::Integer(value) = value {
+                            (LENGTH_KEY, Object::Integer(value)) => {
                                 primary_file_length = Some(value.parse::<u64>().unwrap());
                             }
-                        }
-                        if key == FILES_KEY {
-                            if let Object::List(ref mut files_object) = value {
+                            (FILES_KEY, Object::List(mut files_object)) => {
                                 while let Ok(Some(Object::Dict(mut file_object))) =
                                     files_object.next_object()
                                 {
-                                    let mut file_name = None;
+                                    let mut file_path = None;
                                     let mut file_length = None;
                                     while let Ok(Some((key, value))) = file_object.next_pair() {
-                                        if key == NAME_KEY {
-                                            if let Object::Bytes(value) = value {
-                                                file_name = Some(str::from_utf8(value).unwrap());
+                                        match (key, value) {
+                                            (PATH_KEY, Object::List(mut path_components_obj)) => {
+                                                let mut path_components = PathBuf::new();
+                                                while let Ok(Some(Object::Bytes(path_component))) =
+                                                    path_components_obj.next_object()
+                                                {
+                                                    path_components.push(
+                                                        str::from_utf8(path_component).unwrap(),
+                                                    );
+                                                }
+                                                file_path = Some(path_components);
                                             }
-                                        }
-                                        if key == LENGTH_KEY {
-                                            if let Object::Integer(value) = value {
+                                            (LENGTH_KEY, Object::Integer(value)) => {
                                                 file_length = Some(value.parse::<u64>().unwrap());
                                             }
+                                            _ => {}
                                         }
                                     }
-                                    if let (Some(file_name), Some(file_length)) =
-                                        (file_name, file_length)
+                                    if let (Some(file_path), Some(file_length)) =
+                                        (file_path, file_length)
                                     {
                                         files.push(models::FileInfo {
-                                            relative_path: file_name.to_string(),
+                                            relative_path: file_path,
                                             length: file_length,
                                         });
                                     }
                                 }
                             }
-                        }
-                        if key == PIECE_LENGTH_KEY {
-                            if let Object::Integer(value) = value {
+                            (PIECE_LENGTH_KEY, Object::Integer(value)) => {
                                 piece_length = Some(value.parse::<u32>().unwrap());
                             }
-                        }
-                        if key == PIECES_KEY {
-                            if let Object::Bytes(value) = value {
+                            (PIECES_KEY, Object::Bytes(value)) => {
                                 let mut offset = 0;
                                 while offset < value.len() {
                                     let mut hash = [0; models::PIECE_HASH_BYTE_LEN];
@@ -106,17 +109,19 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
                                     offset += models::PIECE_HASH_BYTE_LEN;
                                 }
                             }
+                            _ => {}
                         }
                     }
                     info_hash = Some(utils::sha1_hash(value.into_raw().unwrap()));
                 }
+                _ => {}
             }
         }
     }
     if files.is_empty() {
         if let (Some(file_name), Some(file_length)) = (primary_file_name, primary_file_length) {
             files.push(models::FileInfo {
-                relative_path: file_name.to_string(),
+                relative_path: file_name,
                 length: file_length,
             });
         }
