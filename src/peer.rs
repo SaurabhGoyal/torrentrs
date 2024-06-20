@@ -32,15 +32,15 @@ pub struct PeerConnection {
 pub struct PeerClientState {
     choked: bool,
     interested: bool,
-    bitfield: Vec<bool>,
+    bitfield: Option<Vec<bool>>,
 }
 
 #[derive(Debug)]
 pub enum PeerCommand {
     PeerChoke(bool),
     HostInterest(bool),
-    PeerRequest(u32, u32, u32),
-    PeerCancel(u32, u32, u32),
+    PeerRequest(usize, u32, u32),
+    PeerCancel(usize, u32, u32),
 }
 
 #[derive(Debug)]
@@ -60,10 +60,10 @@ impl Peer {
     }
 
     pub fn connect(self) -> Result<PeerConnection, io::Error> {
-        let stream = TcpStream::connect_timeout(
-            &SocketAddr::new(self.ip.parse::<IpAddr>().unwrap(), self.port),
-            Duration::from_secs(1800),
-        )?;
+        let stream = TcpStream::connect(&SocketAddr::new(
+            self.ip.parse::<IpAddr>().unwrap(),
+            self.port,
+        ))?;
         Ok(PeerConnection { peer: self, stream })
     }
 }
@@ -89,7 +89,11 @@ impl PeerConnection {
         let _ = self.stream.read(handshake_msg.as_mut_slice())?;
         // Verify handshake
         assert_eq!(torrent_info_hash, handshake_msg[28..48]);
+        // Send have none message.
+        let _ = self.stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 15_u8])?;
+        // Send interested message.
         let _ = self.stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8])?;
+        self.stream.flush()?;
         Ok(PeerActiveConnection {
             peer: self.peer,
             torrent_info_hash,
@@ -98,12 +102,12 @@ impl PeerConnection {
             host_state: Arc::new(Mutex::new(PeerClientState {
                 choked: true,
                 interested: true,
-                bitfield: vec![false; piece_count],
+                bitfield: None,
             })),
             peer_state: Arc::new(Mutex::new(PeerClientState {
                 choked: false,
                 interested: false,
-                bitfield: vec![false; piece_count],
+                bitfield: None,
             })),
             piece_count,
         })
@@ -113,7 +117,7 @@ impl PeerConnection {
 impl PeerActiveConnection {
     pub async fn start_exchange(
         self,
-        cmd_rx: Receiver<PeerCommand>,
+        cmd_rx: Arc<Mutex<Receiver<PeerCommand>>>,
         data_tx: Arc<Mutex<Sender<writer::Data>>>,
     ) -> Result<Arc<Self>, io::Error> {
         let self_arc = Arc::new(self);
@@ -134,17 +138,16 @@ impl PeerActiveConnection {
 
     fn start_listener(&self, data_tx: Arc<Mutex<Sender<writer::Data>>>) -> Result<(), io::Error> {
         let mut len_buf = [0_u8; 4];
-        let max_size = 1 << 16;
+        let max_size = 1 << 17;
         self.log("listener started");
         loop {
             let read_bytes = self.read(&mut len_buf)?;
             if read_bytes > 0 {
                 let len = u32::from_be_bytes(len_buf) as usize;
-                self.log(format!("Read - {:?} ({:?})", len_buf, len).as_str());
                 if len > 0 && len < max_size {
                     let mut data_buf: Vec<u8> = vec![0_u8; len];
                     self.read(data_buf.as_mut_slice()).unwrap();
-                    println!("Message type - {}", data_buf[0]);
+                    self.log(format!("Message type - {}", data_buf[0]).as_str());
                     match data_buf[0] {
                         0_u8 => self.mark_host_choked(true),
                         1_u8 => self.mark_host_choked(false),
@@ -189,14 +192,14 @@ impl PeerActiveConnection {
                     };
                 }
             }
-            thread::sleep(Duration::from_millis(1000));
+            thread::sleep(Duration::from_millis(20));
         }
         Ok(())
     }
 
-    fn start_writer(&self, cmd_rx: Receiver<PeerCommand>) -> Result<(), io::Error> {
+    fn start_writer(&self, cmd_rx: Arc<Mutex<Receiver<PeerCommand>>>) -> Result<(), io::Error> {
         self.log("writer started");
-        while let Ok(cmd) = cmd_rx.recv() {
+        while let Ok(cmd) = cmd_rx.lock().unwrap().recv() {
             self.log(format!("received cmd: [{:?}]", cmd).as_str());
             match cmd {
                 PeerCommand::PeerChoke(choked) => self.mark_peer_choked(choked)?,
@@ -214,10 +217,7 @@ impl PeerActiveConnection {
     }
 
     fn log(&self, msg: &str) {
-        println!(
-            "{}: {msg}",
-            self.stream.lock().unwrap().peer_addr().unwrap()
-        );
+        println!("{}:{}: {msg}", self.peer.ip, self.peer.port);
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, io::Error> {
@@ -237,11 +237,22 @@ impl PeerActiveConnection {
     }
 
     fn set_peer_bitfield_index(&self, index: usize) {
-        self.peer_state.lock().unwrap().bitfield[index] = true;
+        if self.peer_state.lock().unwrap().bitfield.is_none() {
+            self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
+        }
+        self.peer_state.lock().unwrap().bitfield.as_mut().unwrap()[index] = true;
     }
 
     fn set_peer_bitfield(&self, bitfield: Vec<bool>) {
-        self.peer_state.lock().unwrap().bitfield[..self.piece_count]
+        if self.peer_state.lock().unwrap().bitfield.is_none() {
+            self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
+        }
+        self.peer_state
+            .lock()
+            .unwrap()
+            .bitfield
+            .as_mut()
+            .unwrap()
             .copy_from_slice(&bitfield[..self.piece_count]);
     }
 
@@ -257,11 +268,18 @@ impl PeerActiveConnection {
         Ok(())
     }
 
-    fn request(&self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
+    fn request(&self, index: usize, begin: u32, length: u32) -> Result<(), io::Error> {
+        if let Some(bitfield) = self.peer_state.lock().unwrap().bitfield.as_mut() {
+            if !bitfield[index] {
+                self.log(
+                    format!("piece {index} not available with peer, ignoring request").as_str(),
+                );
+            }
+        }
         let msg = [
             &13_u32.to_be_bytes()[..],
             &6_u32.to_be_bytes()[3..4],
-            &index.to_be_bytes()[..],
+            &(index as u32).to_be_bytes()[..],
             &begin.to_be_bytes()[..],
             &length.to_be_bytes()[..],
         ]
@@ -270,11 +288,11 @@ impl PeerActiveConnection {
         Ok(())
     }
 
-    fn cancel(&self, index: u32, begin: u32, length: u32) -> Result<(), io::Error> {
+    fn cancel(&self, index: usize, begin: u32, length: u32) -> Result<(), io::Error> {
         let msg = [
             &13_u32.to_be_bytes()[..],
             &8_u32.to_be_bytes()[3..4],
-            &index.to_be_bytes()[..],
+            &(index as u32).to_be_bytes()[..],
             &begin.to_be_bytes()[..],
             &length.to_be_bytes()[..],
         ]

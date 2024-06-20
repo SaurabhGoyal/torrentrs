@@ -9,8 +9,7 @@ use crate::{models, utils};
 
 #[derive(Debug)]
 pub struct FilePersistenceInfo {
-    index: usize,
-    relative_path: String,
+    relative_path: PathBuf,
     length: u64,
     piece_indices: Vec<usize>,
     path: Option<PathBuf>,
@@ -18,7 +17,6 @@ pub struct FilePersistenceInfo {
 
 #[derive(Debug)]
 pub struct PiecePersistenceInfo {
-    index: usize,
     hash: [u8; models::PIECE_HASH_BYTE_LEN],
     length: u32,
     file_index: usize,
@@ -46,6 +44,7 @@ pub struct DataWriter {
 
 impl DataWriter {
     pub fn new(
+        info_hash: &[u8],
         dest_path: &str,
         files_info: &[models::FileInfo],
         pieces_info: &[models::PieceInfo],
@@ -53,7 +52,9 @@ impl DataWriter {
         let dest_path = Path::new(dest_path).to_path_buf();
         let dest_path_metadata = dest_path.symlink_metadata()?;
         assert!(dest_path_metadata.is_dir());
-        let temp_path = dest_path.join(".tmp").to_path_buf();
+        let temp_path = dest_path
+            .join(format!(".tmp_{}", utils::bytes_to_hex_encoding(info_hash)))
+            .to_path_buf();
         if let Err(e) = fs::create_dir(temp_path.as_path()) {
             println!("Error in creating tmp dir - {e}");
         }
@@ -64,7 +65,6 @@ impl DataWriter {
             .iter()
             .enumerate()
             .map(|(index, pi)| PiecePersistenceInfo {
-                index,
                 hash: pi.hash,
                 length: pi.length,
                 file_index: 0, // This will be updates when we create file info.
@@ -81,7 +81,6 @@ impl DataWriter {
                 let file_pieces_count = (fi.length as usize + piece_len - 1) / piece_len;
                 let piece_indices = next_piece_index..next_piece_index + file_pieces_count;
                 let info = FilePersistenceInfo {
-                    index,
                     relative_path: fi.relative_path.clone(),
                     length: fi.length,
                     piece_indices: piece_indices.clone().collect(),
@@ -110,15 +109,25 @@ impl DataWriter {
     }
 
     pub fn start(&mut self) -> Result<(), io::Error> {
+        println!("Listening for data write requests.");
         while let Ok(data) = self.data_rx.recv() {
             match data {
-                Data::Piece(index, data) => self.write_piece(index, data.as_slice())?,
+                Data::Piece(index, data) => {
+                    println!("Data Write for piece {} requested", index);
+                    self.write_piece(index, data.as_slice())?;
+                    println!("Data Write for piece {} completed", index);
+                }
             }
         }
         Ok(())
     }
 
     fn write_piece(&mut self, index: usize, data: &[u8]) -> Result<(), io::Error> {
+        assert!(index < self.meta.pieces.len());
+        if self.meta.pieces[index].path.is_some() {
+            println!("Piece {index} already exists.");
+            return Ok(());
+        }
         let piece_path = self.meta.temp_path.join(format!(
             "{}_{}",
             index,
@@ -131,6 +140,46 @@ impl DataWriter {
             .write_all(data)?;
         println!("Written piece {index} at {:?}", piece_path);
         self.meta.pieces[index].path = Some(piece_path);
+        self.check_and_write_file(self.meta.pieces[index].file_index)?;
+        Ok(())
+    }
+
+    fn check_and_write_file(&mut self, index: usize) -> Result<(), io::Error> {
+        assert!(index < self.meta.files.len());
+        let total_pieces = self.meta.files[index].piece_indices.len();
+        let pieces_completed = self.meta.files[index]
+            .piece_indices
+            .iter()
+            .map(|pi| &self.meta.pieces[*pi])
+            .filter(|p| p.path.is_some())
+            .collect::<Vec<&PiecePersistenceInfo>>();
+        println!(
+            "File {index} - pieces - {} / {} ",
+            pieces_completed.len(),
+            total_pieces
+        );
+        if pieces_completed.len() == total_pieces {
+            let file_path = self
+                .meta
+                .dest_path
+                .join(self.meta.files[index].relative_path.as_path());
+            println!("File {index} - writing file - {:?}", file_path.as_path());
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(file_path.as_path())?;
+
+            for piece in pieces_completed {
+                let mut piece_file = fs::OpenOptions::new()
+                    .read(true)
+                    .open(piece.path.as_ref().unwrap())?;
+                let bytes_copied = io::copy(&mut piece_file, &mut file)?;
+                assert_eq!(bytes_copied, (piece.length >> 1) as u64);
+                println!("Written piece {index} to file {:?}", file_path);
+            }
+            println!("Written file {index} to {:?}", file_path);
+            self.meta.files[index].path = Some(file_path);
+        }
         Ok(())
     }
 }

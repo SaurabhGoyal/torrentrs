@@ -35,9 +35,10 @@ Client level
 - [ ] CRUD for torrents.
 - [ ] TUI.
 
-Peer Connection
+Tracker and Peer Connection
+- [ ] UDP trackers.
 - [ ] Event loop / async for better performance.
-- [ ] Piece request pipelining at TCP as well as application level.
+- [ ] Piece request scheduling at TCP as well as application level.
 - [ ] DHT.
 
 Server level
