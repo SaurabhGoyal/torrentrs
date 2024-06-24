@@ -16,11 +16,20 @@ pub struct FilePersistenceInfo {
 }
 
 #[derive(Debug)]
+pub struct BlockPersistenceInfo {
+    piece_index: usize,
+    begin: usize,
+    length: usize,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
 pub struct PiecePersistenceInfo {
     hash: [u8; models::PIECE_HASH_BYTE_LEN],
-    length: u32,
+    length: usize,
     file_index: usize,
-    path: Option<PathBuf>,
+    blocks: Vec<BlockPersistenceInfo>,
+    completed: bool,
 }
 
 #[derive(Debug)]
@@ -33,7 +42,7 @@ pub struct DataWriterMeta {
 
 #[derive(Debug)]
 pub enum Data {
-    Piece(usize, Vec<u8>),
+    PieceBlock(usize, usize, usize, Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -64,11 +73,12 @@ impl DataWriter {
         let mut pieces = pieces_info
             .iter()
             .enumerate()
-            .map(|(index, pi)| PiecePersistenceInfo {
+            .map(|(_index, pi)| PiecePersistenceInfo {
                 hash: pi.hash,
                 length: pi.length,
                 file_index: 0, // This will be updates when we create file info.
-                path: None,
+                blocks: vec![],
+                completed: false,
             })
             .collect::<Vec<PiecePersistenceInfo>>();
 
@@ -112,35 +122,76 @@ impl DataWriter {
         println!("Listening for data write requests.");
         while let Ok(data) = self.data_rx.recv() {
             match data {
-                Data::Piece(index, data) => {
-                    println!("Data Write for piece {} requested", index);
-                    self.write_piece(index, data.as_slice())?;
-                    println!("Data Write for piece {} completed", index);
+                Data::PieceBlock(index, begin, length, data) => {
+                    println!(
+                        "Data Write for piece block ({}, {}, {}) requested",
+                        index, begin, length
+                    );
+                    self.write_piece_block(index, begin, length, data.as_slice())?;
+                    println!(
+                        "Data Write for piece block ({}, {}, {}) completed",
+                        index, begin, length
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    fn write_piece(&mut self, index: usize, data: &[u8]) -> Result<(), io::Error> {
+    fn write_piece_block(
+        &mut self,
+        index: usize,
+        begin: usize,
+        length: usize,
+        data: &[u8],
+    ) -> Result<(), io::Error> {
         assert!(index < self.meta.pieces.len());
-        if self.meta.pieces[index].path.is_some() {
-            println!("Piece {index} already exists.");
+        assert!(begin < self.meta.pieces[index].length);
+        assert!(begin + length < self.meta.pieces[index].length);
+        if self.meta.pieces[index].completed {
+            println!("Piece {index} is already complete.");
             return Ok(());
         }
-        let piece_path = self.meta.temp_path.join(format!(
-            "{}_{}",
+        if self.meta.pieces[index]
+            .blocks
+            .iter()
+            .any(|b| b.begin > begin && b.begin < begin + length)
+        {
+            println!("Piece block ({index}, {begin}, {length}) already exists.");
+            return Ok(());
+        }
+        let piece_block_path = self.meta.temp_path.join(format!(
+            "{}_{}_{}",
             index,
-            utils::bytes_to_hex_encoding(&self.meta.pieces[index].hash)
+            utils::bytes_to_hex_encoding(&self.meta.pieces[index].hash),
+            begin,
         ));
         fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(piece_path.as_path())?
+            .open(piece_block_path.as_path())?
             .write_all(data)?;
-        println!("Written piece {index} at {:?}", piece_path);
-        self.meta.pieces[index].path = Some(piece_path);
-        self.check_and_write_file(self.meta.pieces[index].file_index)?;
+        println!(
+            "Written piece block ({index}, {begin}, {length}) at {:?}",
+            piece_block_path
+        );
+        self.meta.pieces[index].blocks.push(BlockPersistenceInfo {
+            piece_index: index,
+            begin,
+            length,
+            path: piece_block_path,
+        });
+        self.meta.pieces[index].blocks.sort_by_key(|b| b.begin);
+        let blocks_length = self.meta.pieces[index]
+            .blocks
+            .iter()
+            .map(|b| b.length)
+            .sum();
+        println!("Piece block ({index}, {begin}, {length}) total blocks length - {blocks_length}");
+        if self.meta.pieces[index].length == blocks_length {
+            self.meta.pieces[index].completed = true;
+            self.check_and_write_file(self.meta.pieces[index].file_index)?;
+        }
         Ok(())
     }
 
@@ -151,7 +202,7 @@ impl DataWriter {
             .piece_indices
             .iter()
             .map(|pi| &self.meta.pieces[*pi])
-            .filter(|p| p.path.is_some())
+            .filter(|p| p.completed)
             .collect::<Vec<&PiecePersistenceInfo>>();
         println!(
             "File {index} - pieces - {} / {} ",
@@ -170,12 +221,17 @@ impl DataWriter {
                 .open(file_path.as_path())?;
 
             for piece in pieces_completed {
-                let mut piece_file = fs::OpenOptions::new()
-                    .read(true)
-                    .open(piece.path.as_ref().unwrap())?;
-                let bytes_copied = io::copy(&mut piece_file, &mut file)?;
-                assert_eq!(bytes_copied, (piece.length >> 1) as u64);
-                println!("Written piece {index} to file {:?}", file_path);
+                for block in piece.blocks.iter() {
+                    let mut piece_block_file = fs::OpenOptions::new()
+                        .read(true)
+                        .open(block.path.as_path())?;
+                    let bytes_copied = io::copy(&mut piece_block_file, &mut file)?;
+                    assert_eq!(bytes_copied, (piece.length >> 1) as u64);
+                    println!(
+                        "Written piece block ({index}, {}, {}) to file {:?}",
+                        block.begin, block.length, file_path
+                    );
+                }
             }
             println!("Written file {index} to {:?}", file_path);
             self.meta.files[index].path = Some(file_path);

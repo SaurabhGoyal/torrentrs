@@ -133,7 +133,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
             .into_iter()
             .map(|hash| models::PieceInfo {
                 hash,
-                length: piece_length.unwrap(),
+                length: piece_length.unwrap() as usize,
             })
             .collect(),
         info_hash: info_hash.unwrap(),

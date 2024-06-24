@@ -14,7 +14,7 @@ pub struct FileInfo {
 #[derive(Debug)]
 pub struct PieceInfo {
     pub hash: [u8; PIECE_HASH_BYTE_LEN],
-    pub length: u32,
+    pub length: usize,
 }
 
 #[derive(Debug)]
