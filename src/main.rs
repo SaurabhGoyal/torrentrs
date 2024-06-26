@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, thread};
 
 mod bencode;
 mod client;
@@ -8,17 +8,15 @@ mod torrent;
 mod utils;
 mod writer;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = env::args().collect::<Vec<String>>();
     let mut client = client::Client::new();
-    let handle = tokio::spawn(async move {
+    let handle = thread::spawn(move || {
         let tor = client
             .add_torrent(&args[1])
-            .await
             .expect("error in adding torrent file path");
         println!("{:?}", tor.peers);
-        client.start_torrent(tor, &args[2]).await.unwrap();
+        client.start_torrent(tor, &args[2]).unwrap();
     });
-    handle.await.unwrap();
+    handle.join().unwrap();
 }

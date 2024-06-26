@@ -127,7 +127,8 @@ impl DataWriter {
                         "Data Write for piece block ({}, {}, {}) requested",
                         index, begin, length
                     );
-                    self.write_piece_block(index, begin, length, data.as_slice())?;
+                    self.write_piece_block(index, begin, length, data.as_slice())
+                        .unwrap();
                     println!(
                         "Data Write for piece block ({}, {}, {}) completed",
                         index, begin, length
@@ -146,8 +147,8 @@ impl DataWriter {
         data: &[u8],
     ) -> Result<(), io::Error> {
         assert!(index < self.meta.pieces.len());
-        assert!(begin < self.meta.pieces[index].length);
-        assert!(begin + length < self.meta.pieces[index].length);
+        assert!(begin <= self.meta.pieces[index].length);
+        assert!(begin + length <= self.meta.pieces[index].length);
         if self.meta.pieces[index].completed {
             println!("Piece {index} is already complete.");
             return Ok(());
@@ -166,13 +167,14 @@ impl DataWriter {
             utils::bytes_to_hex_encoding(&self.meta.pieces[index].hash),
             begin,
         ));
-        fs::OpenOptions::new()
+        let _wb = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(piece_block_path.as_path())?
-            .write_all(data)?;
+            .write(data)
+            .unwrap();
         println!(
-            "Written piece block ({index}, {begin}, {length}) at {:?}",
+            "Written piece block ({index}, {begin}, {length}) at {:?} ({_wb} bytes)",
             piece_block_path
         );
         self.meta.pieces[index].blocks.push(BlockPersistenceInfo {
@@ -190,7 +192,8 @@ impl DataWriter {
         println!("Piece block ({index}, {begin}, {length}) total blocks length - {blocks_length}");
         if self.meta.pieces[index].length == blocks_length {
             self.meta.pieces[index].completed = true;
-            self.check_and_write_file(self.meta.pieces[index].file_index)?;
+            self.check_and_write_file(self.meta.pieces[index].file_index)
+                .unwrap();
         }
         Ok(())
     }

@@ -17,14 +17,14 @@ impl Client {
     pub fn new() -> Self {
         let mut peer_id = [0_u8; 20];
         let (clinet_info, rest) = peer_id.split_at_mut(8);
-        clinet_info.copy_from_slice("-rS0010-".as_bytes());
+        clinet_info.copy_from_slice("-rS0001-".as_bytes());
         rand::thread_rng().fill_bytes(rest);
         Client {
             config: models::ClientConfig { peer_id },
         }
     }
 
-    pub async fn add_torrent(&mut self, file_path: &str) -> Result<models::TorrentInfo, io::Error> {
+    pub fn add_torrent(&mut self, file_path: &str) -> Result<models::TorrentInfo, io::Error> {
         // Read file
         let mut file = fs::OpenOptions::new().read(true).open(file_path)?;
         let mut buf: Vec<u8> = vec![];
@@ -32,13 +32,12 @@ impl Client {
         // Parse metadata_info
         let metainfo = bencode::decode_metainfo(buf.as_slice());
         // Add torrent;
-        let tor = torrent::add(metainfo, &self.config)
-            .await
-            .expect("error in adding torrent from metainfo");
+        let tor =
+            torrent::add(metainfo, &self.config).expect("error in adding torrent from metainfo");
         Ok(tor)
     }
 
-    pub async fn start_torrent(
+    pub fn start_torrent(
         &mut self,
         tor: models::TorrentInfo,
         dest_path: &str,
@@ -51,12 +50,12 @@ impl Client {
             &tor.meta.pieces,
         )?;
         let data_tx = Arc::new(Mutex::new(data_tx));
-        // handles.push(tokio::spawn(async move {
-        //     data_writer.start()?;
-        //     Ok::<(), io::Error>(())
-        // }));
+        handles.push(thread::spawn(move || {
+            data_writer.start().unwrap();
+            Ok::<(), io::Error>(())
+        }));
         let pieces_count = tor.meta.pieces.len();
-        // let mut cmd_txs = vec![];
+        let mut cmd_txs = vec![];
         let block_length = tor.meta.pieces[0].length >> 1;
         for p in tor.peers.iter() {
             let ip = p.ip.clone();
@@ -66,45 +65,41 @@ impl Client {
             let data_tx = data_tx.clone();
             let (cmd_tx, cmd_rx) = channel::<peer::PeerCommand>();
             if ip == "116.88.97.233" {
-                handles.push(tokio::spawn(async move {
+                handles.push(thread::spawn(move || {
                     peer::Peer::new([0; 20], ip, port)
                         .connect()?
                         .activate(torrent_info_hash, client_peer_id, pieces_count)?
-                        .start_exchange(cmd_rx, data_tx)
-                        .await?;
+                        .start_exchange(cmd_rx, data_tx)?;
                     Ok::<(), io::Error>(())
                 }));
-                thread::sleep(Duration::from_secs(30));
-                let _ = cmd_tx.send(peer::PeerCommand::PieceBlockRequest(0, 0, block_length));
-                // cmd_txs.push(cmd_tx);
+                cmd_txs.push(cmd_tx);
             }
         }
 
-        // handles.push(tokio::spawn(async move {
-        //     let piece_count = pieces_count;
-        //     for index in 0..piece_count {
-        //         for cmd_tx in cmd_txs.iter() {
-        //             let _ =
-        //                 cmd_tx.send(peer::PeerCommand::PieceBlockRequest(index, 0, block_length));
-        //             let _ = cmd_tx.send(peer::PeerCommand::PieceBlockRequest(
-        //                 index,
-        //                 block_length,
-        //                 block_length,
-        //             ));
-        //         }
-        //         if index % 2 == 0 {
-        //             thread::sleep(Duration::from_secs(60));
-        //         }
-        //         if index % 20 == 0 {
-        //             break;
-        //         }
-        //     }
-        //     Ok::<(), io::Error>(())
-        // }));
+        handles.push(thread::spawn(move || {
+            thread::sleep(Duration::from_secs(5));
+            let piece_count = pieces_count;
+            for index in 0..piece_count {
+                for cmd_tx in cmd_txs.iter() {
+                    let _ =
+                        cmd_tx.send(peer::PeerCommand::PieceBlockRequest(index, 0, block_length));
+                    let _ = cmd_tx.send(peer::PeerCommand::PieceBlockRequest(
+                        index,
+                        block_length,
+                        block_length,
+                    ));
+                }
+                if index > 15 {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+            Ok::<(), io::Error>(())
+        }));
 
         for handle in handles {
-            if let Err(e) = handle.await {
-                println!("Error in handle - {e}");
+            if let Err(e) = handle.join() {
+                println!("Error in handle - {:?}", e);
             }
         }
         Ok(tor)
