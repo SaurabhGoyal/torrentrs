@@ -121,6 +121,9 @@ impl PeerActiveConnection {
             let len = u32::from_be_bytes(len_buf) as usize;
             if len > 0 && len < max_size {
                 match len {
+                    0 => {
+                        // keep-alive message
+                    }
                     1.. => {
                         let mut msg_type = [0_u8];
                         stream.read_exact(&mut msg_type).unwrap();

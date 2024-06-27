@@ -40,6 +40,71 @@ pub fn start(
     let peers = get_announce_response(&meta, client_config);
     println!("Peers {:?}", peers);
     let client_id = client_config.peer_id;
+
+    let piece_standard_length = meta.pieces[0].length;
+    let mut piece_budget = piece_standard_length;
+    let mut file_budget = meta.files[0].length as usize;
+    let mut begin = 0_usize;
+    let mut piece_index = 0_usize;
+    let mut file_index = 0_usize;
+    let mut files: Vec<models::File> = vec![];
+    let mut pieces: Option<Vec<models::Piece>> = Some(vec![]);
+    let mut blocks: Option<HashMap<String, models::Block>> = Some(HashMap::new());
+
+    while file_index < meta.files.len() {
+        // Find the length that can be added
+        let length = min(min(MAX_BLOCK_LENGTH, piece_budget), file_budget);
+        // We would always hit the block boundary, add block and move block cursor.
+        blocks.as_mut().unwrap().insert(
+            get_block_id(piece_index, begin),
+            models::Block {
+                file_index,
+                piece_index,
+                begin,
+                length,
+                path: None,
+                last_requested_at: None,
+            },
+        );
+        begin += length;
+        piece_budget -= length;
+        file_budget -= length;
+        // If we have hit piece or file boundary, add piece and move piece cursor.
+        if piece_budget == 0 || file_budget == 0 {
+            pieces.as_mut().unwrap().push(models::Piece {
+                index: piece_index,
+                length: blocks
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|(_, block)| block.length)
+                    .sum(),
+                blocks: blocks.unwrap(),
+            });
+            begin = 0;
+            piece_index += 1;
+            piece_budget = piece_standard_length;
+            blocks = Some(HashMap::new());
+
+            // If we have hit file boundary, add file and move file cursor.
+            if file_budget == 0 {
+                files.push(models::File {
+                    index: file_index,
+                    relative_path: meta.files[file_index].relative_path.clone(),
+                    length: meta.files[file_index].length as usize,
+                    pieces: pieces.unwrap(),
+                    path: None,
+                });
+                if file_index + 1 >= meta.files.len() {
+                    break;
+                }
+                file_index += 1;
+                file_budget = meta.files[file_index].length as usize;
+                pieces = Some(vec![]);
+            }
+        }
+    }
+
     let mut blocks: HashMap<String, models::Block> = HashMap::new();
     for (piece_index, piece_info) in meta.pieces.iter().enumerate() {
         let mut begin = 0;
@@ -91,7 +156,7 @@ pub fn start(
     let torrent_arc_writer = torrent_arc.clone();
     let writer_handle = thread::spawn(move || {
         let mut end_game_mode = false;
-        let mut concurrent_peers = 2;
+        let mut concurrent_peers = 3;
         loop {
             {
                 let mut torrent = torrent_arc_writer.lock().unwrap();

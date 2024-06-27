@@ -43,6 +43,22 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug)]
+pub struct File {
+    pub index: usize,
+    pub relative_path: PathBuf,
+    pub length: usize,
+    pub pieces: Vec<Piece>,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct Piece {
+    pub index: usize,
+    pub length: usize,
+    pub blocks: HashMap<String, Block>,
+}
+
+#[derive(Debug)]
 pub struct Block {
     pub file_index: usize,
     pub piece_index: usize,
