@@ -104,4 +104,16 @@ impl Client {
         }
         Ok(tor)
     }
+
+    pub fn add_torrent_2(&mut self, file_path: &str, dest_path: &str) -> Result<(), io::Error> {
+        // Read file
+        let mut file = fs::OpenOptions::new().read(true).open(file_path)?;
+        let mut buf: Vec<u8> = vec![];
+        file.read_to_end(&mut buf)?;
+        // Parse metadata_info
+        let metainfo = bencode::decode_metainfo(buf.as_slice());
+        // Add torrent;
+        torrent::start(metainfo, &self.config, dest_path).unwrap();
+        Ok(())
+    }
 }
