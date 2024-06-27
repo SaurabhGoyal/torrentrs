@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::mpsc::Sender};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc::Sender, time::SystemTime};
 
 // Piece hash byte length
 pub const INFO_HASH_BYTE_LEN: usize = 20;
@@ -49,6 +49,7 @@ pub struct Block {
     pub begin: usize,
     pub length: usize,
     pub path: Option<PathBuf>,
+    pub last_requested_at: Option<SystemTime>,
 }
 
 #[derive(Debug)]
@@ -72,6 +73,7 @@ pub struct Peer {
     pub port: u16,
     pub control_rx: Option<Sender<PeerControlCommand>>,
     pub state: Option<PeerState>,
+    pub last_connected_at: Option<SystemTime>,
 }
 
 #[derive(Debug)]
