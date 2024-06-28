@@ -55,6 +55,7 @@ pub struct File {
 pub struct Piece {
     pub index: usize,
     pub length: usize,
+    pub have: usize,
     pub blocks: HashMap<String, Block>,
 }
 
@@ -96,12 +97,23 @@ pub struct Peer {
 pub struct Torrent {
     pub meta: MetaInfo,
     pub dest_path: PathBuf,
-    pub blocks: HashMap<String, Block>,
+    pub files: Vec<File>,
     pub peers: HashMap<String, Peer>,
 }
 
+pub enum PeerStateEvent {
+    Init(PeerState),
+    FieldChoked(bool),
+    FieldHave(usize),
+    FieldBitfield(Vec<bool>),
+}
+
+pub enum PeerEvent {
+    Control(Sender<PeerControlCommand>),
+    State(PeerStateEvent),
+}
+
 pub enum TorrentEvent {
-    PeerControlChange(String, u16, Option<Sender<PeerControlCommand>>),
-    PeerStateChange(String, u16, Option<PeerState>),
+    Peer(String, u16, PeerEvent),
     Block(usize, usize, Vec<u8>),
 }

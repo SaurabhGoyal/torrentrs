@@ -38,10 +38,10 @@ impl PeerConnection {
         event_tx
             .lock()
             .unwrap()
-            .send(models::TorrentEvent::PeerControlChange(
+            .send(models::TorrentEvent::Peer(
                 ip.clone(),
                 port,
-                Some(control_tx),
+                models::PeerEvent::Control(control_tx),
             ))
             .unwrap();
         PeerConnection {
@@ -77,23 +77,34 @@ impl PeerConnection {
         let _ = self.stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 1_u8]).unwrap();
         // Send interested message.
         let _ = self.stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8]).unwrap();
-        let peer_state = models::PeerState {
-            handshake: true,
-            choked: true,
-            interested: true,
-            bitfield: None,
-        };
-        let peer_active_conn = PeerActiveConnection {
-            peer_conn: self,
-            peer_state: Arc::new(Mutex::new(peer_state)),
+        Ok(PeerActiveConnection::new(
+            self,
+            models::PeerState {
+                handshake: true,
+                choked: true,
+                interested: true,
+                bitfield: None,
+            },
             piece_count,
-        };
-        peer_active_conn.send_state_change_event();
-        Ok(peer_active_conn)
+        ))
     }
 }
 
 impl PeerActiveConnection {
+    pub fn new(
+        peer_conn: PeerConnection,
+        peer_state: models::PeerState,
+        piece_count: usize,
+    ) -> Self {
+        let peer_active_conn = PeerActiveConnection {
+            peer_conn,
+            peer_state: Arc::new(Mutex::new(peer_state.clone())),
+            piece_count,
+        };
+        peer_active_conn.send_state_event(models::PeerStateEvent::Init(peer_state));
+        peer_active_conn
+    }
+
     pub fn start_exchange(self) -> Result<Arc<Self>, io::Error> {
         let listener_stream = self.peer_conn.stream.try_clone().unwrap();
         let writer_stream = self.peer_conn.stream.try_clone().unwrap();
@@ -137,33 +148,31 @@ impl PeerActiveConnection {
                                 self.set_peer_bitfield_index(index);
                             }
                             (_, 5_u8) => {
-                                if len - 1 == bitfield_byte_count {
-                                    let mut bitfield_buf = vec![0_u8; bitfield_byte_count];
-                                    stream.read_exact(&mut bitfield_buf).unwrap();
-
-                                    let mut bitfield = vec![false; self.piece_count];
-                                    let mut index = 0;
-                                    for byte in &bitfield_buf {
-                                        for i in 0..8 {
-                                            let bit = byte >> (7 - i) & 1;
-                                            bitfield[index] = bit == 1;
-                                            index += 1;
-                                            if index >= self.piece_count {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    self.set_peer_bitfield(bitfield);
-                                } else {
+                                if len - 1 != bitfield_byte_count {
                                     self.log(
                                         format!(
-                                            "invalid bf msg size - ex - {} actu - {}",
+                                            "extra bf msg size - ex - {} actu - {}, reading only till required bit-count",
                                             bitfield_byte_count,
                                             len - 1
                                         )
                                         .as_str(),
                                     );
                                 }
+                                let mut bitfield_buf = vec![0_u8; len - 1];
+                                stream.read_exact(&mut bitfield_buf).unwrap();
+                                let mut bitfield = vec![false; self.piece_count];
+                                let mut index = 0;
+                                for byte in &bitfield_buf[..bitfield_byte_count] {
+                                    for i in 0..8 {
+                                        let bit = byte >> (7 - i) & 1;
+                                        bitfield[index] = bit == 1;
+                                        index += 1;
+                                        if index >= self.piece_count {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.set_peer_bitfield(bitfield);
                             }
                             (8.., 7_u8) => {
                                 let msg_len = len - 1;
@@ -217,22 +226,22 @@ impl PeerActiveConnection {
         println!("{}:{}: {msg}", self.peer_conn.ip, self.peer_conn.port);
     }
 
-    fn send_state_change_event(&self) {
+    fn send_state_event(&self, event: models::PeerStateEvent) {
         self.peer_conn
             .event_tx
             .lock()
             .unwrap()
-            .send(models::TorrentEvent::PeerStateChange(
+            .send(models::TorrentEvent::Peer(
                 self.peer_conn.ip.clone(),
                 self.peer_conn.port,
-                Some(self.peer_state.lock().unwrap().clone()),
+                models::PeerEvent::State(event),
             ))
             .unwrap();
     }
 
     fn mark_choked(&self, choked: bool) {
         self.peer_state.lock().unwrap().choked = choked;
-        self.send_state_change_event();
+        self.send_state_event(models::PeerStateEvent::FieldChoked(choked));
     }
 
     fn set_peer_bitfield_index(&self, index: usize) {
@@ -240,7 +249,7 @@ impl PeerActiveConnection {
             self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
         }
         self.peer_state.lock().unwrap().bitfield.as_mut().unwrap()[index] = true;
-        self.send_state_change_event();
+        self.send_state_event(models::PeerStateEvent::FieldHave(index));
     }
 
     fn set_peer_bitfield(&self, bitfield: Vec<bool>) {
@@ -254,7 +263,7 @@ impl PeerActiveConnection {
             .as_mut()
             .unwrap()
             .copy_from_slice(&bitfield[..self.piece_count]);
-        self.send_state_change_event();
+        self.send_state_event(models::PeerStateEvent::FieldBitfield(bitfield.clone()));
     }
 
     fn request(
