@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::mpsc::Sender, time::SystemTime};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{mpsc::Sender, Arc, RwLock},
+    time::SystemTime,
+};
 
 // Piece hash byte length
 pub const INFO_HASH_BYTE_LEN: usize = 20;
@@ -47,7 +52,7 @@ pub struct File {
     pub index: usize,
     pub relative_path: PathBuf,
     pub length: usize,
-    pub pieces: Vec<Piece>,
+    pub block_ids: Vec<String>,
     pub path: Option<PathBuf>,
 }
 
@@ -56,7 +61,6 @@ pub struct Piece {
     pub index: usize,
     pub length: usize,
     pub have: usize,
-    pub blocks: HashMap<String, Block>,
 }
 
 #[derive(Debug)]
@@ -94,11 +98,15 @@ pub struct Peer {
 }
 
 #[derive(Debug)]
-pub struct Torrent {
+pub struct TorrentState {
     pub meta: MetaInfo,
+    pub client_id: [u8; PEER_ID_BYTE_LEN],
     pub dest_path: PathBuf,
-    pub files: Vec<File>,
-    pub peers: HashMap<String, Peer>,
+    pub temp_prefix_path: PathBuf,
+    pub files: Vec<Arc<RwLock<File>>>,
+    pub pieces: Vec<Arc<RwLock<Piece>>>,
+    pub blocks: HashMap<String, Arc<RwLock<Block>>>,
+    pub peers: HashMap<String, Arc<RwLock<Peer>>>,
 }
 
 pub enum PeerStateEvent {
