@@ -2,6 +2,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
@@ -382,10 +383,16 @@ pub fn start(
                 models::TorrentEvent::Block(piece_index, begin, data) => {
                     let block_id = get_block_id(piece_index, begin);
                     let file_index = block_id_file_index_map_clone_writer.get(&block_id).unwrap();
-                    let mut torrent = torrent_arc_reader.lock().unwrap();
-                    let block = torrent.files[*file_index].pieces[piece_index]
+                    let torrent = torrent_arc_reader.lock().unwrap();
+                    let file = torrent.files.get(*file_index).unwrap();
+                    let file_path: Option<PathBuf> =
+                        Some(torrent.dest_path.join(file.relative_path.as_path()));
+                    let block = file
+                        .pieces
+                        .get(piece_index)
+                        .unwrap()
                         .blocks
-                        .get_mut(&block_id)
+                        .get(&block_id)
                         .unwrap();
                     if block.path.is_some() {
                         continue;
@@ -399,17 +406,51 @@ pub fn start(
                         .unwrap()
                         .write(data.as_slice())
                         .unwrap();
+
                     let mut torrent = torrent_arc_reader.lock().unwrap();
-                    let block = torrent.files[*file_index].pieces[piece_index]
-                        .blocks
-                        .get_mut(&block_id)
-                        .unwrap();
+                    let file = torrent.files.get_mut(*file_index).unwrap();
+                    let block = file.pieces[piece_index].blocks.get_mut(&block_id).unwrap();
                     println!(
                         "Written block ({}, {}, {}) at {:?}",
                         block.piece_index, block.begin, block.length, block_path
                     );
                     block.path = Some(block_path);
-                    // if complete
+                    let file_complete = file
+                        .pieces
+                        .iter()
+                        .flat_map(|piece| piece.blocks.iter())
+                        .all(|(_block_id, block)| block.path.is_some());
+                    drop(torrent);
+                    // If all blocks of the file are done, write them to file.
+                    if file_complete {
+                        let mut file_object = fs::OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(file_path.as_ref().unwrap().as_path())
+                            .unwrap();
+                        let mut torrent = torrent_arc_reader.lock().unwrap();
+                        let file = torrent.files.get_mut(*file_index).unwrap();
+                        let mut blocks = file
+                            .pieces
+                            .iter()
+                            .flat_map(|piece| piece.blocks.iter())
+                            .collect::<Vec<(&String, &models::Block)>>();
+                        blocks.sort_by_key(|(block_id, _)| *block_id);
+
+                        for (block_id, block) in blocks {
+                            let mut block_file = fs::OpenOptions::new()
+                                .read(true)
+                                .open(block.path.as_ref().unwrap().as_path())
+                                .unwrap();
+                            let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
+                            assert_eq!(bytes_copied, (block.length) as u64);
+                            println!("Written block {block_id} to file {:?}", file_path);
+                        }
+                        println!("Written file {} to {:?}", file_index, file_path);
+                        let mut torrent = torrent_arc_reader.lock().unwrap();
+                        let file = torrent.files.get_mut(*file_index).unwrap();
+                        file.path = file_path;
+                    }
                 }
             }
         }
@@ -451,5 +492,5 @@ fn get_peer_id(ip: &str, port: u16) -> String {
 }
 
 fn get_block_id(index: usize, begin: usize) -> String {
-    format!("{}_{}", index, begin)
+    format!("{:03}_{:06}", index, begin)
 }
