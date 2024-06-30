@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{mpsc::Sender, Arc, RwLock},
+    thread::JoinHandle,
     time::SystemTime,
 };
 
@@ -94,7 +95,8 @@ pub struct Peer {
     pub port: u16,
     pub control_rx: Option<Sender<PeerControlCommand>>,
     pub state: Option<PeerState>,
-    pub last_connected_at: Option<SystemTime>,
+    pub handle: Option<JoinHandle<()>>,
+    pub last_initiated_at: Option<SystemTime>,
 }
 
 #[derive(Debug)]
