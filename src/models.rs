@@ -34,6 +34,7 @@ pub struct MetaInfo {
     pub info_hash: [u8; INFO_HASH_BYTE_LEN],
     pub tracker: String,
     pub files: Vec<FileInfo>,
+    pub directory: Option<PathBuf>,
     pub pieces: Vec<PieceInfo>,
 }
 

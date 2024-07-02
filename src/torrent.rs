@@ -23,10 +23,11 @@ use crate::peer_copy;
 use crate::utils;
 
 const MAX_BLOCK_LENGTH: usize = 1 << 14;
-const MAX_CONCURRENT_BLOCKS: usize = 30;
+const MAX_CONCURRENT_BLOCKS: usize = 300;
 const MIN_PEERS_FOR_DOWNLOAD: usize = 1;
-const BLOCK_REQUEST_TIMEOUT_MS: u64 = 5000;
-const PEER_REQUEST_TIMEOUT_MS: u64 = 10000;
+const BLOCK_REQUEST_TIMEOUT_MS: u64 = 60000;
+const PEER_REQUEST_TIMEOUT_MS: u64 = 60000;
+const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 10000;
 
 #[derive(Debug)]
 pub enum TorrentError {
@@ -147,9 +148,13 @@ fn build_torrent_state(
         // If we have hit file boundary, add file and move file cursor.
         if file_budget == 0 {
             block_ids.sort();
+            let mut file_path = meta.files[file_index].relative_path.clone();
+            if let Some(dir_path) = meta.directory.as_ref() {
+                file_path = dir_path.join(file_path);
+            }
             files.push(Arc::new(RwLock::new(models::File {
                 index: file_index,
-                relative_path: meta.files[file_index].relative_path.clone(),
+                relative_path: file_path,
                 length: meta.files[file_index].length as usize,
                 block_ids: block_ids.clone(),
                 path: None,
@@ -388,7 +393,7 @@ fn start_block_scheduler(
                 }
             }
         }
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
     }
 }
 
@@ -398,6 +403,9 @@ fn start_event_processor(
 ) {
     let piece_count = torrent_state.meta.pieces.len();
     fs::create_dir_all(torrent_state.temp_prefix_path.as_path()).unwrap();
+    if let Some(dir_path) = torrent_state.meta.directory.as_ref() {
+        fs::create_dir_all(dir_path.as_path()).unwrap();
+    }
     while let Ok(event) = event_rx.recv() {
         match event {
             models::TorrentEvent::Peer(ip, port, event) => {

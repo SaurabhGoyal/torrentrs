@@ -118,13 +118,18 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
             }
         }
     }
-    if files.is_empty() {
-        if let (Some(file_name), Some(file_length)) = (primary_file_name, primary_file_length) {
+    let mut directory = None;
+    match (primary_file_name, primary_file_length, files.is_empty()) {
+        (Some(file_name), Some(file_length), false) => {
             files.push(models::FileInfo {
                 relative_path: file_name,
                 length: file_length,
             });
         }
+        (Some(file_name), _, _) => {
+            directory = Some(file_name);
+        }
+        _ => {}
     }
     models::MetaInfo {
         tracker: tracker.unwrap().to_string(),
@@ -137,6 +142,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> models::MetaInfo {
             })
             .collect(),
         info_hash: info_hash.unwrap(),
+        directory,
     }
 }
 
