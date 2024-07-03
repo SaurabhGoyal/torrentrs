@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read, Write},
+    io::{self, Error, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     sync::{
         mpsc::{channel, Sender},
@@ -22,6 +22,7 @@ pub struct PeerState {
 }
 
 pub enum PeerStateEvent {
+    ConnectionError(Error),
     Init(PeerState),
     FieldChoked(bool),
     FieldHave(usize),
@@ -64,12 +65,11 @@ impl PeerController {
         torrent_info_hash: [u8; 20],
         client_peer_id: [u8; 20],
         piece_count: usize,
-    ) -> Self {
+    ) -> Result<Self, io::Error> {
         let mut stream = TcpStream::connect_timeout(
             &SocketAddr::new(ip.parse::<IpAddr>().unwrap(), port),
             Duration::from_millis(5000),
-        )
-        .unwrap();
+        )?;
         let mut handshake_msg = [
             HANSHAKE_PSTR_LEN,
             HANSHAKE_PSTR,
@@ -79,15 +79,15 @@ impl PeerController {
         ]
         .concat();
         // Send handshake
-        let _ = stream.write(handshake_msg.as_slice()).unwrap();
+        let _ = stream.write(handshake_msg.as_slice())?;
         // Receive handshake ack
-        let _ = stream.read(handshake_msg.as_mut_slice()).unwrap();
+        let _ = stream.read(handshake_msg.as_mut_slice())?;
         // Verify handshake
         assert_eq!(torrent_info_hash, handshake_msg[28..48]);
         // Send unchoke message.
-        let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 1_u8]).unwrap();
+        let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 1_u8])?;
         // Send interested message.
-        let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8]).unwrap();
+        let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8])?;
         let peer_controller = PeerController {
             ip,
             port,
@@ -104,24 +104,26 @@ impl PeerController {
         peer_controller.send_event(PeerEvent::State(PeerStateEvent::Init(
             peer_controller.peer_state.lock().unwrap().clone(),
         )));
-        peer_controller
+        Ok(peer_controller)
     }
 
-    pub fn start_exchange(self) -> Result<Arc<Self>, io::Error> {
+    pub fn start(self) -> Result<(), io::Error> {
         let listener_stream = self.stream.try_clone().unwrap();
         let writer_stream = self.stream.try_clone().unwrap();
         let self_arc = Arc::new(self);
         let listener = self_arc.clone();
         let listener_handle = thread::spawn(move || {
-            listener.start_listener(listener_stream).unwrap();
+            listener.start_listener(listener_stream)?;
+            Ok::<(), io::Error>(())
         });
         let writer = self_arc.clone();
         let writer_handle = thread::spawn(move || {
-            writer.start_writer(writer_stream).unwrap();
+            writer.start_writer(writer_stream)?;
+            Ok::<(), io::Error>(())
         });
-        listener_handle.join().unwrap();
-        writer_handle.join().unwrap();
-        Ok(self_arc)
+        listener_handle.join().unwrap()?;
+        writer_handle.join().unwrap()?;
+        Ok(())
     }
 
     fn start_listener(&self, mut stream: TcpStream) -> Result<(), io::Error> {
@@ -130,7 +132,7 @@ impl PeerController {
         let bitfield_byte_count = (self.piece_count + 7) / 8;
         self.log("listener started");
         loop {
-            stream.read_exact(&mut len_buf).unwrap();
+            stream.read_exact(&mut len_buf)?;
             let len = u32::from_be_bytes(len_buf) as usize;
             if len > 0 && len < max_size {
                 match len {
@@ -139,13 +141,13 @@ impl PeerController {
                     }
                     1.. => {
                         let mut msg_type = [0_u8];
-                        stream.read_exact(&mut msg_type).unwrap();
+                        stream.read_exact(&mut msg_type)?;
                         match (len - 1, msg_type[0]) {
                             (0, 0_u8) => self.mark_choked(true),
                             (0, 1_u8) => self.mark_choked(false),
                             (4, 4_u8) => {
                                 let mut index_buf = [0_u8; 4];
-                                stream.read_exact(&mut index_buf).unwrap();
+                                stream.read_exact(&mut index_buf)?;
                                 let index = u32::from_be_bytes(index_buf) as usize;
                                 self.set_peer_bitfield_index(index);
                             }
@@ -161,7 +163,7 @@ impl PeerController {
                                     );
                                 }
                                 let mut bitfield_buf = vec![0_u8; len - 1];
-                                stream.read_exact(&mut bitfield_buf).unwrap();
+                                stream.read_exact(&mut bitfield_buf)?;
                                 let mut bitfield = vec![false; self.piece_count];
                                 let mut index = 0;
                                 for byte in &bitfield_buf[..bitfield_byte_count] {
@@ -179,7 +181,7 @@ impl PeerController {
                             (8.., 7_u8) => {
                                 let msg_len = len - 1;
                                 let mut msg_buf = vec![0_u8; msg_len];
-                                stream.read_exact(&mut msg_buf).unwrap();
+                                stream.read_exact(&mut msg_buf)?;
                                 let mut index_buf = [0_u8; 4];
                                 let mut begin_buf = [0_u8; 4];
                                 index_buf.copy_from_slice(&msg_buf[0..4]);
@@ -208,10 +210,10 @@ impl PeerController {
             self.log(format!("received cmd: [{:?}]", cmd).as_str());
             match cmd {
                 PeerControlCommand::PieceBlockRequest(index, begin, length) => {
-                    self.request(&mut stream, index, begin, length).unwrap();
+                    self.request(&mut stream, index, begin, length)?;
                 }
                 PeerControlCommand::Shutdown => {
-                    stream.shutdown(std::net::Shutdown::Both).unwrap();
+                    stream.shutdown(std::net::Shutdown::Both)?;
                 }
             }
             self.log(format!("executed cmd: [{:?}]", cmd).as_str());
@@ -275,7 +277,7 @@ impl PeerController {
         msg[5..9].copy_from_slice(&(index as u32).to_be_bytes());
         msg[9..13].copy_from_slice(&(begin as u32).to_be_bytes());
         msg[13..17].copy_from_slice(&(length as u32).to_be_bytes());
-        let _wb = stream.write(&msg).unwrap();
+        let _wb = stream.write(&msg)?;
         Ok(())
     }
 }

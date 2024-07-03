@@ -1,8 +1,9 @@
 use rand::{Rng as _, RngCore};
+use std::fmt::Write;
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write as _},
     sync::mpsc::{channel, Receiver, Sender},
     thread::{self, JoinHandle},
     time::Duration,
@@ -14,7 +15,6 @@ use crate::{
 };
 // Piece hash byte length
 const INFO_HASH_BYTE_LEN: usize = 20;
-const PIECE_HASH_BYTE_LEN: usize = 20;
 const PEER_ID_BYTE_LEN: usize = 20;
 const MAX_EVENTS_PER_CYCLE: usize = 500;
 
@@ -35,7 +35,7 @@ pub enum ClientControlCommand {
 
 #[derive(Debug)]
 struct Torrent {
-    hash: [u8; INFO_HASH_BYTE_LEN],
+    name: String,
     control_tx: Option<Sender<torrent::TorrentControlCommand>>,
     handle: Option<JoinHandle<()>>,
     state: Option<TorrentState>,
@@ -43,7 +43,7 @@ struct Torrent {
 
 pub struct Client {
     peer_id: [u8; PEER_ID_BYTE_LEN],
-    torrents: HashMap<[u8; 20], Torrent>,
+    torrents: HashMap<[u8; INFO_HASH_BYTE_LEN], Torrent>,
     event_tx: Sender<TorrentControllerEvent>,
     event_rx: Receiver<TorrentControllerEvent>,
     control_rx: Receiver<ClientControlCommand>,
@@ -51,7 +51,7 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> (Self, Sender<ClientControlCommand>) {
-        let mut peer_id = [0_u8; 20];
+        let mut peer_id = [0_u8; PEER_ID_BYTE_LEN];
         let (clinet_info, rest) = peer_id.split_at_mut(8);
         clinet_info.copy_from_slice("-rS0001-".as_bytes());
         rand::thread_rng().fill_bytes(rest);
@@ -123,14 +123,21 @@ impl Client {
         let metainfo = bencode::decode_metainfo(buf.as_slice());
         let (mut torrent_controller, control_tx) = torrent::TorrentController::new(
             &metainfo,
-            self.peer_id.clone(),
+            self.peer_id,
             dest_path,
             self.event_tx.clone(),
         );
         self.torrents.insert(
-            metainfo.info_hash.clone(),
+            metainfo.info_hash,
             Torrent {
-                hash: metainfo.info_hash.clone(),
+                name: match metainfo.directory {
+                    Some(dir) => dir.to_str().unwrap().to_string(),
+                    None => metainfo.files[0]
+                        .relative_path
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                },
                 control_tx: Some(control_tx),
                 handle: None,
                 state: None,
@@ -155,6 +162,36 @@ impl Client {
                 });
             }
         }
-        println!("{:?}", self.torrents);
+        clear_screen();
+        println!(
+            "{}",
+            self.torrents.values().fold(String::new(), |mut out, ts| {
+                match ts.state.as_ref() {
+                    Some(tsu) => {
+                        let _ = write!(
+                            out,
+                            "[{}] -> Blocks - {}/{}, Files - {}/{}, Peers - {}/{}",
+                            ts.name,
+                            tsu.blocks_completed,
+                            tsu.blocks_total,
+                            tsu.files_completed,
+                            tsu.files_total,
+                            tsu.peers_connected,
+                            tsu.peers_total
+                        );
+                    }
+                    None => {
+                        let _ = write!(out, "[{}] -> ----- ", ts.name,);
+                    }
+                }
+                out
+            })
+        );
     }
+}
+
+fn clear_screen() {
+    print!("{}[2J", 27 as char); // ANSI escape code to clear the screen
+    print!("{}[1;1H", 27 as char); // ANSI escape code to move the cursor to the top-left corner
+    io::stdout().flush().unwrap(); // Flush stdout to ensure screen is cleared immediately
 }

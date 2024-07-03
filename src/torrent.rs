@@ -237,6 +237,20 @@ impl TorrentController {
                     }
                 }
 
+                // Update peers
+                for (_peer_id, peer) in self
+                    .torrent
+                    .peers
+                    .as_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .filter(|(_peer_id, peer)| peer.handle.is_some())
+                {
+                    if peer.handle.as_ref().unwrap().is_finished() {
+                        peer.handle = None;
+                    }
+                }
+
                 // Check updated status
                 let pending_blocks_count = self
                     .torrent
@@ -244,15 +258,8 @@ impl TorrentController {
                     .iter()
                     .filter(|(_block_id, block)| block.path.is_none())
                     .count();
-                let total_block_count = self.torrent.blocks.len();
-
                 // Enqueue download requests for pending blocks.
                 if pending_blocks_count > 0 {
-                    println!(
-                        "Blocks - {} / {}",
-                        total_block_count - pending_blocks_count,
-                        total_block_count
-                    );
                     if pending_blocks_count < 3 {
                         end_game_mode = true;
                         concurrent_peers = 10;
@@ -264,13 +271,12 @@ impl TorrentController {
                         concurrent_peers,
                     );
                 } else {
-                    println!("all blocks downloaded, closing writer");
                     if self.torrent.files.iter().all(|file| file.path.is_some()) {
                         // Delete temp directory
                         fs::remove_dir_all(temp_prefix_path.as_path()).unwrap();
                     }
                     // Close all peer connections
-                    for (peer_id, peer) in self
+                    for (_peer_id, peer) in self
                         .torrent
                         .peers
                         .as_mut()
@@ -285,7 +291,6 @@ impl TorrentController {
                         //  This will close the peer writer.
                         peer.control_rx = None;
                         peer.state = None;
-                        println!("Waiting for peer {peer_id} to close");
                         // We don't care if peer thread faced any issue.
                         let _ = peer.handle.take().unwrap().join();
                     }
@@ -401,13 +406,6 @@ impl TorrentController {
                     .unwrap()
                     .write(&data)
                     .unwrap();
-                println!(
-                    "Written block ({}, {}, {}) at {:?}",
-                    piece_index,
-                    begin,
-                    data.len(),
-                    block_path
-                );
                 block.path = Some(block_path);
 
                 // Check if file is complete.
@@ -429,7 +427,7 @@ impl TorrentController {
                         .write(true)
                         .open(file_path.as_path())
                         .unwrap();
-                    for (block_id, block) in file_completed_blocks {
+                    for (_block_id, block) in file_completed_blocks {
                         let mut block_file = fs::OpenOptions::new()
                             .read(true)
                             .open(block.path.as_ref().unwrap().as_path())
@@ -437,9 +435,7 @@ impl TorrentController {
                         let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
                         assert_eq!(bytes_copied, (block.length) as u64);
                         fs::remove_file(block.path.as_ref().unwrap().as_path()).unwrap();
-                        println!("Written block {block_id} to file {:?}", file_path);
                     }
-                    println!("Written file {} to {:?}", file_index, file_path);
                     file.path = Some(file_path);
                 }
                 self.send_torrent_controller_event();
@@ -509,16 +505,16 @@ impl TorrentController {
                         let client_peer_id = self.torrent.client_id;
                         let pieces_count = self.torrent.pieces.len();
                         peer.handle = Some(thread::spawn(move || {
-                            peer::PeerController::new(
+                            if let Ok(peer_controller) = peer::PeerController::new(
                                 ip,
                                 port,
                                 event_tx,
                                 torrent_info_hash,
                                 client_peer_id,
                                 pieces_count,
-                            )
-                            .start_exchange()
-                            .unwrap();
+                            ) {
+                                let _ = peer_controller.start();
+                            }
                         }));
                         peer.last_initiated_at = Some(SystemTime::now());
                     });
