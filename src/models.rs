@@ -1,9 +1,5 @@
 use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{mpsc::Sender, Arc, RwLock},
-    thread::JoinHandle,
-    time::SystemTime,
+    collections::HashMap, path::PathBuf, sync::mpsc::Sender, thread::JoinHandle, time::SystemTime,
 };
 
 // Piece hash byte length
@@ -105,10 +101,10 @@ pub struct TorrentState {
     pub meta: MetaInfo,
     pub client_id: [u8; PEER_ID_BYTE_LEN],
     pub dest_path: PathBuf,
-    pub files: Vec<Arc<RwLock<File>>>,
-    pub pieces: Vec<Arc<RwLock<Piece>>>,
-    pub blocks: HashMap<String, Arc<RwLock<Block>>>,
-    pub peers: HashMap<String, Arc<RwLock<Peer>>>,
+    pub files: Vec<File>,
+    pub pieces: Vec<Piece>,
+    pub blocks: HashMap<String, Block>,
+    pub peers: HashMap<String, Peer>,
 }
 
 pub enum PeerStateEvent {

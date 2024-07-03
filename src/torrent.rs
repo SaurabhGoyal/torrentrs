@@ -1,18 +1,13 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -23,11 +18,12 @@ use crate::peer_copy;
 use crate::utils;
 
 const MAX_BLOCK_LENGTH: usize = 1 << 14;
-const MAX_CONCURRENT_BLOCKS: usize = 30;
+const MAX_CONCURRENT_BLOCKS: usize = 500;
 const MIN_PEERS_FOR_DOWNLOAD: usize = 1;
-const BLOCK_REQUEST_TIMEOUT_MS: u64 = 10000;
-const PEER_REQUEST_TIMEOUT_MS: u64 = 10000;
-const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 1000;
+const BLOCK_REQUEST_TIMEOUT_MS: u64 = 6000;
+const PEER_REQUEST_TIMEOUT_MS: u64 = 6000;
+const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
+const MAX_EVENTS_PER_CYCLE: i32 = 10000;
 
 #[derive(Debug)]
 pub enum TorrentError {
@@ -50,18 +46,7 @@ pub fn start(
     let peers_info = get_announce_response(&meta, client_config);
     println!("Peers {:?}", peers_info);
     let torrent_state = build_torrent_state(meta, peers_info, client_config.peer_id, dest_path);
-    let torrent_state = Arc::new(torrent_state);
-    let torrent_state_block_scheduler = torrent_state.clone();
-    let torrent_state_event_processor = torrent_state.clone();
-    let (event_tx, event_rx) = channel::<models::TorrentEvent>();
-    let block_scheduler_handle = thread::spawn(move || {
-        start_block_scheduler(torrent_state_block_scheduler, event_tx);
-    });
-    let event_processor_handle = thread::spawn(move || {
-        start_event_processor(torrent_state_event_processor, event_rx);
-    });
-    block_scheduler_handle.join().unwrap();
-    event_processor_handle.join().unwrap();
+    start_torrent_manager(torrent_state);
     Ok(())
 }
 
@@ -106,9 +91,9 @@ fn build_torrent_state(
     let mut piece_length = 0_usize;
     let mut block_ids = vec![];
     let mut file_index = 0_usize;
-    let mut files: Vec<Arc<RwLock<models::File>>> = vec![];
-    let mut pieces: Vec<Arc<RwLock<models::Piece>>> = vec![];
-    let mut blocks: HashMap<String, Arc<RwLock<models::Block>>> = HashMap::new();
+    let mut files: Vec<models::File> = vec![];
+    let mut pieces: Vec<models::Piece> = vec![];
+    let mut blocks: HashMap<String, models::Block> = HashMap::new();
 
     while file_index < meta.files.len() {
         // Find the length that can be added
@@ -117,14 +102,14 @@ fn build_torrent_state(
         // We would always hit the block boundary, add block and move block cursor.
         blocks.insert(
             block_id.clone(),
-            Arc::new(RwLock::new(models::Block {
+            models::Block {
                 file_index,
                 piece_index,
                 begin,
                 length: block_length,
                 path: None,
                 last_requested_at: None,
-            })),
+            },
         );
         begin += block_length;
         piece_length += block_length;
@@ -133,11 +118,11 @@ fn build_torrent_state(
         file_budget -= block_length;
         // If we have hit piece boundary or this is the last piece for last file, add piece and move piece cursor.
         if piece_budget == 0 || (file_budget == 0 && file_index == meta.files.len() - 1) {
-            pieces.push(Arc::new(RwLock::new(models::Piece {
+            pieces.push(models::Piece {
                 index: piece_index,
                 length: piece_length,
                 have: 0,
-            })));
+            });
             begin = 0;
             piece_index += 1;
             piece_length = 0;
@@ -147,13 +132,13 @@ fn build_torrent_state(
         // If we have hit file boundary, add file and move file cursor.
         if file_budget == 0 {
             block_ids.sort();
-            files.push(Arc::new(RwLock::new(models::File {
+            files.push(models::File {
                 index: file_index,
                 relative_path: meta.files[file_index].relative_path.clone(),
                 length: meta.files[file_index].length as usize,
                 block_ids: block_ids.clone(),
                 path: None,
-            })));
+            });
             block_ids.clear();
             if file_index + 1 >= meta.files.len() {
                 break;
@@ -167,17 +152,17 @@ fn build_torrent_state(
         .map(|peer_info| {
             (
                 get_peer_id(peer_info.ip.as_str(), peer_info.port),
-                Arc::new(RwLock::new(models::Peer {
+                models::Peer {
                     ip: peer_info.ip,
                     port: peer_info.port,
                     control_rx: None,
                     state: None,
                     last_initiated_at: None,
                     handle: None,
-                })),
+                },
             )
         })
-        .collect::<HashMap<String, Arc<RwLock<models::Peer>>>>();
+        .collect::<HashMap<String, models::Peer>>();
     let mut dest_path = PathBuf::from(dest_path);
     if let Some(dir_path) = meta.directory.as_ref() {
         dest_path = dest_path.join(dir_path);
@@ -193,328 +178,284 @@ fn build_torrent_state(
     }
 }
 
-fn start_block_scheduler(
-    torrent_state: Arc<models::TorrentState>,
-    event_tx: Sender<models::TorrentEvent>,
-) {
+fn start_torrent_manager(mut torrent_state: models::TorrentState) {
     let mut end_game_mode = false;
     let mut concurrent_peers = 3;
-    loop {
-        {
-            let mut requested_blocks: HashMap<String, (usize, SystemTime)> = HashMap::new();
-            let mut initiated_peers: HashMap<String, (JoinHandle<()>, SystemTime)> = HashMap::new();
-            let mut unreachable_peers: HashSet<String> = HashSet::new();
-
-            let mut candidate_blocks = torrent_state
-                .blocks
-                .iter()
-                .filter(|(_block_id, block)| {
-                    let block = block.read().unwrap();
-                    block.path.is_none()
-                        && (block.last_requested_at.is_none()
-                            || SystemTime::now()
-                                .duration_since(*block.last_requested_at.as_ref().unwrap())
-                                .unwrap()
-                                > Duration::from_millis(BLOCK_REQUEST_TIMEOUT_MS))
-                })
-                .collect::<Vec<(&String, &Arc<RwLock<models::Block>>)>>();
-
-            candidate_blocks.sort_by_key(|(_block_id, block)| {
-                torrent_state.pieces[block.read().unwrap().piece_index]
-                    .read()
-                    .unwrap()
-                    .have
-            });
-
-            for (block_id, block) in candidate_blocks.into_iter().take(MAX_CONCURRENT_BLOCKS) {
-                let block = block.read().unwrap();
-                let candidate_peers = torrent_state
-                    .peers
-                    .iter()
-                    .filter(|(_peer_id, peer)| {
-                        let peer = peer.read().unwrap();
-                        peer.control_rx.is_some()
-                            && peer.state.is_some()
-                            && !peer.state.as_ref().unwrap().choked
-                            && peer.state.as_ref().unwrap().bitfield.is_some()
-                            && peer.state.as_ref().unwrap().bitfield.as_ref().unwrap()
-                                [block.piece_index]
-                    })
-                    .collect::<Vec<(&String, &Arc<RwLock<models::Peer>>)>>();
-                if candidate_peers.len() < MIN_PEERS_FOR_DOWNLOAD {
-                    torrent_state
-                        .peers
-                        .iter()
-                        .filter(|(_peer_id, peer)| {
-                            let peer = peer.read().unwrap();
-                            peer.control_rx.is_none()
-                                && (peer.last_initiated_at.is_none()
-                                    || SystemTime::now()
-                                        .duration_since(*peer.last_initiated_at.as_ref().unwrap())
-                                        .unwrap()
-                                        > Duration::from_millis(PEER_REQUEST_TIMEOUT_MS))
-                        })
-                        .take(concurrent_peers)
-                        .for_each(|(peer_id, peer)| {
-                            let peer = peer.read().unwrap();
-                            if peer.control_rx.is_some() || initiated_peers.contains_key(peer_id) {
-                                return;
-                            }
-                            let event_tx = event_tx.clone();
-                            let ip = peer.ip.clone();
-                            let port = peer.port;
-                            let torrent_info_hash = torrent_state.meta.info_hash;
-                            let client_peer_id = torrent_state.client_id;
-                            let pieces_count = torrent_state.meta.pieces.len();
-                            let peer_handle = thread::spawn(move || {
-                                peer_copy::PeerConnection::new(ip, port, event_tx)
-                                    .activate(torrent_info_hash, client_peer_id, pieces_count)
-                                    .unwrap()
-                                    .start_exchange()
-                                    .unwrap();
-                            });
-                            initiated_peers
-                                .insert(peer_id.to_string(), (peer_handle, SystemTime::now()));
-                        });
-                } else {
-                    for (peer_id, peer) in candidate_peers {
-                        // Request a block with only one peer unless we are in end-game
-                        if !requested_blocks.contains_key(block_id) || end_game_mode {
-                            let peer = peer.read().unwrap();
-                            match peer.control_rx.as_ref().unwrap().send(
-                                models::PeerControlCommand::PieceBlockRequest(
-                                    block.piece_index,
-                                    block.begin,
-                                    block.length,
-                                ),
-                            ) {
-                                // Peer has become unreachabnle,
-                                Ok(_) => {
-                                    requested_blocks.insert(
-                                        block_id.to_string(),
-                                        (block.piece_index, SystemTime::now()),
-                                    );
-                                }
-                                Err(_) => {
-                                    unreachable_peers.insert(peer_id.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for (block_id, (piece_index, requested_at)) in requested_blocks {
-                let mut block = torrent_state
-                    .blocks
-                    .get(&block_id)
-                    .unwrap()
-                    .write()
-                    .unwrap();
-                block.last_requested_at = Some(requested_at);
-            }
-            for (peer_id, (handle, initiated_at)) in initiated_peers {
-                let mut peer = torrent_state.peers.get(&peer_id).unwrap().write().unwrap();
-                peer.handle = Some(handle);
-                peer.last_initiated_at = Some(initiated_at);
-            }
-            for peer_id in unreachable_peers {
-                let mut peer = torrent_state.peers.get(&peer_id).unwrap().write().unwrap();
-                peer.control_rx = None;
-                peer.state = None;
-            }
-            let completed_blocks = torrent_state
-                .blocks
-                .iter()
-                .filter(|(_block_id, block)| block.read().unwrap().path.is_some())
-                .map(|(block_id, _block)| block_id)
-                .collect::<Vec<&String>>();
-            let pending_blocks = torrent_state
-                .blocks
-                .iter()
-                .filter(|(_block_id, block)| block.read().unwrap().path.is_none())
-                .map(|(block_id, _block)| block_id)
-                .collect::<Vec<&String>>();
-
-            if pending_blocks.is_empty() {
-                println!("all blocks downloaded, closing writer");
-                // Close all peer connections
-                for (_peer_id, peer) in torrent_state
-                    .peers
-                    .iter()
-                    .filter(|(_peer_id, peer)| peer.read().unwrap().control_rx.is_some())
-                {
-                    let mut peer = peer.write().unwrap();
-                    //  This will close the peer stream, which will close peer listener.
-                    let _ = peer
-                        .control_rx
-                        .as_ref()
-                        .unwrap()
-                        .send(models::PeerControlCommand::Shutdown);
-                    //  This will close the peer writer.
-                    peer.control_rx = None;
-                    peer.state = None;
-                }
-                println!("Waiting for peer threads to close");
-                for (_peer_id, peer) in torrent_state
-                    .peers
-                    .iter()
-                    .filter(|(_peer_id, peer)| peer.read().unwrap().handle.is_some())
-                {
-                    let mut peer = peer.write().unwrap();
-                    let handle = peer.handle.take().unwrap();
-                    let _ = handle.join();
-                }
-                return;
-            } else {
-                println!(
-                    "Blocks - {} / {}",
-                    completed_blocks.len(),
-                    completed_blocks.len() + pending_blocks.len()
-                );
-                if pending_blocks.len() < 3 {
-                    end_game_mode = true;
-                    concurrent_peers = 10;
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
-    }
-}
-
-fn start_event_processor(
-    torrent_state: Arc<models::TorrentState>,
-    event_rx: Receiver<models::TorrentEvent>,
-) {
-    let piece_count = torrent_state.meta.pieces.len();
+    let (event_tx, event_rx) = channel::<models::TorrentEvent>();
     let temp_prefix_path = torrent_state.dest_path.join(format!(
         ".tmp_{}",
         utils::bytes_to_hex_encoding(&torrent_state.meta.info_hash)
     ));
     // Create destination directory and a temporary directory inside it for holding the blocks.
     fs::create_dir_all(temp_prefix_path.as_path()).unwrap();
-    while let Ok(event) = event_rx.recv() {
-        match event {
-            models::TorrentEvent::Peer(ip, port, event) => {
-                let peer_id = get_peer_id(ip.as_str(), port);
-                let mut peer = torrent_state
-                    .peers
-                    .get(peer_id.as_str())
-                    .unwrap()
-                    .write()
-                    .unwrap();
-                match event {
-                    models::PeerEvent::Control(control_rx) => peer.control_rx = Some(control_rx),
-                    models::PeerEvent::State(event) => match (event, peer.state.as_mut()) {
-                        (models::PeerStateEvent::Init(state), None) => {
-                            peer.state = Some(state);
+
+    loop {
+        {
+            // Process some events
+            let mut processed_events = 0;
+            loop {
+                match event_rx.try_recv() {
+                    Ok(event) => {
+                        process_event(&mut torrent_state, event, temp_prefix_path.as_path());
+                        processed_events += 1;
+                        if processed_events > MAX_EVENTS_PER_CYCLE {
+                            break;
                         }
-                        (models::PeerStateEvent::FieldChoked(choked), Some(state)) => {
-                            state.choked = choked;
+                    }
+                    Err(e) => match e {
+                        std::sync::mpsc::TryRecvError::Empty => {
+                            break;
                         }
-                        (models::PeerStateEvent::FieldHave(index), Some(state)) => {
-                            let state_bitfield =
-                                state.bitfield.get_or_insert(vec![false; piece_count]);
-                            let had = state_bitfield[index];
-                            state_bitfield[index] = true;
-                            if !had {
-                                torrent_state.pieces[index].write().unwrap().have += 1;
-                            }
-                        }
-                        (models::PeerStateEvent::FieldBitfield(bitfield), Some(state)) => {
-                            let state_bitfield =
-                                state.bitfield.get_or_insert(vec![false; piece_count]);
-                            let mut impacted_piece_indices = vec![];
-                            for index in 0..piece_count {
-                                let had = state_bitfield[index];
-                                state_bitfield[index] = bitfield[index];
-                                if !had {
-                                    impacted_piece_indices.push(index);
-                                }
-                            }
-                            torrent_state
-                                .pieces
-                                .iter()
-                                .filter(|piece| {
-                                    impacted_piece_indices.contains(&piece.read().unwrap().index)
-                                })
-                                .for_each(|piece| {
-                                    piece.write().unwrap().have += 1;
-                                });
-                        }
-                        _ => {}
+                        std::sync::mpsc::TryRecvError::Disconnected => todo!(),
                     },
                 }
             }
-            models::TorrentEvent::Block(piece_index, begin, data) => {
-                let block_id = get_block_id(piece_index, begin);
-                let block = torrent_state.blocks.get(&block_id).unwrap().read().unwrap();
-                let file_index = block.file_index;
-                if block.path.is_some() {
-                    continue;
-                }
-                drop(block);
-                let block_path = temp_prefix_path.join(block_id.as_str());
-                let _wb = fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(block_path.as_path())
-                    .unwrap()
-                    .write(data.as_slice())
-                    .unwrap();
 
+            // Check updated status
+            let pending_blocks_count = torrent_state
+                .blocks
+                .iter()
+                .filter(|(_block_id, block)| block.path.is_none())
+                .count();
+            let total_block_count = torrent_state.blocks.len();
+
+            // Enqueue download requests for pending blocks.
+            if pending_blocks_count > 0 {
                 println!(
-                    "Written block ({}, {}, {}) at {:?}",
-                    piece_index,
-                    begin,
-                    data.len(),
-                    block_path
+                    "Blocks - {} / {}",
+                    total_block_count - pending_blocks_count,
+                    total_block_count
                 );
-                torrent_state
-                    .blocks
-                    .get(&block_id)
-                    .unwrap()
-                    .write()
-                    .unwrap()
-                    .path = Some(block_path);
-
-                // Check if file is complete.
-                let file = torrent_state.files[file_index].read().unwrap();
-                let file_path = torrent_state.dest_path.join(file.relative_path.as_path());
-                let file_block_ids = file.block_ids.as_slice();
-                let file_complete = torrent_state
-                    .blocks
-                    .iter()
-                    .filter(|(block_id, _)| file_block_ids.contains(block_id))
-                    .all(|(_block_id, block)| block.read().unwrap().path.is_some());
-                // If all blocks of the file are done, write them to file.
-                if file_complete {
-                    let mut file_object = fs::OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(file_path.as_path())
-                        .unwrap();
-                    for block_id in file_block_ids {
-                        let block = torrent_state.blocks.get(block_id).unwrap().read().unwrap();
-                        let mut block_file = fs::OpenOptions::new()
-                            .read(true)
-                            .open(block.path.as_ref().unwrap().as_path())
-                            .unwrap();
-                        let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
-                        assert_eq!(bytes_copied, (block.length) as u64);
-                        fs::remove_file(block.path.as_ref().unwrap().as_path()).unwrap();
-                        println!("Written block {block_id} to file {:?}", file_path);
-                    }
-                    drop(file);
-                    println!("Written file {} to {:?}", file_index, file_path);
-                    torrent_state.files[file_index].write().unwrap().path = Some(file_path);
+                if pending_blocks_count < 3 {
+                    end_game_mode = true;
+                    concurrent_peers = 10;
                 }
-                if torrent_state
-                    .files
-                    .iter()
-                    .all(|file| file.read().unwrap().path.is_some())
-                {
+                enqueue_pending_blocks_to_peers(
+                    &mut torrent_state,
+                    event_tx.clone(),
+                    MAX_CONCURRENT_BLOCKS,
+                    end_game_mode,
+                    concurrent_peers,
+                );
+            } else {
+                println!("all blocks downloaded, closing writer");
+                if torrent_state.files.iter().all(|file| file.path.is_some()) {
                     // Delete temp directory
                     fs::remove_dir_all(temp_prefix_path.as_path()).unwrap();
+                }
+                // Close all peer connections
+                for (peer_id, peer) in torrent_state
+                    .peers
+                    .iter_mut()
+                    .filter(|(_peer_id, peer)| peer.handle.is_some())
+                {
+                    if let Some(control_rx) = peer.control_rx.as_ref() {
+                        //  This will close the peer stream, which will close peer listener.
+                        let _ = control_rx.send(models::PeerControlCommand::Shutdown);
+                    }
+                    //  This will close the peer writer.
+                    peer.control_rx = None;
+                    peer.state = None;
+                    println!("Waiting for peer {peer_id} to close");
+                    // We don't care if peer thread faced any issue.
+                    let _ = peer.handle.take().unwrap().join();
+                }
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
+    }
+}
+
+fn process_event(
+    torrent_state: &mut models::TorrentState,
+    event: models::TorrentEvent,
+    temp_prefix_path: &Path,
+) {
+    let piece_count = torrent_state.pieces.len();
+    match event {
+        models::TorrentEvent::Peer(ip, port, event) => {
+            let peer_id = get_peer_id(ip.as_str(), port);
+            let peer = torrent_state.peers.get_mut(peer_id.as_str()).unwrap();
+            match event {
+                models::PeerEvent::Control(control_rx) => peer.control_rx = Some(control_rx),
+                models::PeerEvent::State(event) => match (event, peer.state.as_mut()) {
+                    (models::PeerStateEvent::Init(state), None) => {
+                        peer.state = Some(state);
+                    }
+                    (models::PeerStateEvent::FieldChoked(choked), Some(state)) => {
+                        state.choked = choked;
+                    }
+                    (models::PeerStateEvent::FieldHave(index), Some(state)) => {
+                        let state_bitfield = state.bitfield.get_or_insert(vec![false; piece_count]);
+                        let had = state_bitfield[index];
+                        state_bitfield[index] = true;
+                        if !had {
+                            torrent_state.pieces[index].have += 1;
+                        }
+                    }
+                    (models::PeerStateEvent::FieldBitfield(bitfield), Some(state)) => {
+                        let state_bitfield = state.bitfield.get_or_insert(vec![false; piece_count]);
+                        let mut impacted_piece_indices = vec![];
+                        for index in 0..piece_count {
+                            let had = state_bitfield[index];
+                            state_bitfield[index] = bitfield[index];
+                            if !had {
+                                impacted_piece_indices.push(index);
+                            }
+                        }
+                        torrent_state
+                            .pieces
+                            .iter_mut()
+                            .filter(|piece| impacted_piece_indices.contains(&piece.index))
+                            .for_each(|piece| {
+                                piece.have += 1;
+                            });
+                    }
+                    _ => {}
+                },
+            }
+        }
+        models::TorrentEvent::Block(piece_index, begin, data) => {
+            let block_id = get_block_id(piece_index, begin);
+            let block = torrent_state.blocks.get_mut(&block_id).unwrap();
+            let file_index = block.file_index;
+            if block.path.is_some() {
+                return;
+            }
+            let block_path = temp_prefix_path.join(block_id.as_str());
+            let _wb = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(block_path.as_path())
+                .unwrap()
+                .write(&data)
+                .unwrap();
+            println!(
+                "Written block ({}, {}, {}) at {:?}",
+                piece_index,
+                begin,
+                data.len(),
+                block_path
+            );
+            block.path = Some(block_path);
+
+            // Check if file is complete.
+            let file = torrent_state.files.get_mut(file_index).unwrap();
+            let file_path = torrent_state.dest_path.join(file.relative_path.as_path());
+            let mut file_completed_blocks = torrent_state
+                .blocks
+                .iter_mut()
+                .filter(|(_block_id, block)| block.file_index == file_index && block.path.is_some())
+                .collect::<Vec<(&String, &mut models::Block)>>();
+            file_completed_blocks.sort_by_key(|(_, block)| (block.piece_index, block.begin));
+            // If all blocks of the file are done, write them to file.
+            if file_completed_blocks.len() == file.block_ids.len() {
+                let mut file_object = fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(file_path.as_path())
+                    .unwrap();
+                for (block_id, block) in file_completed_blocks {
+                    let mut block_file = fs::OpenOptions::new()
+                        .read(true)
+                        .open(block.path.as_ref().unwrap().as_path())
+                        .unwrap();
+                    let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
+                    assert_eq!(bytes_copied, (block.length) as u64);
+                    fs::remove_file(block.path.as_ref().unwrap().as_path()).unwrap();
+                    println!("Written block {block_id} to file {:?}", file_path);
+                }
+                println!("Written file {} to {:?}", file_index, file_path);
+                file.path = Some(file_path);
+            }
+        }
+    }
+}
+
+fn enqueue_pending_blocks_to_peers(
+    torrent_state: &mut models::TorrentState,
+    event_tx: Sender<models::TorrentEvent>,
+    count: usize,
+    end_game_mode: bool,
+    concurrent_peers: usize,
+) {
+    let mut pending_blocks = torrent_state
+        .blocks
+        .iter_mut()
+        .filter(|(_block_id, block)| {
+            block.path.is_none()
+                && (block.last_requested_at.is_none()
+                    || SystemTime::now()
+                        .duration_since(*block.last_requested_at.as_ref().unwrap())
+                        .unwrap()
+                        > Duration::from_millis(BLOCK_REQUEST_TIMEOUT_MS))
+        })
+        .collect::<Vec<(&String, &mut models::Block)>>();
+    pending_blocks.sort_by_key(|(_block_id, block)| torrent_state.pieces[block.piece_index].have);
+
+    for (_block_id, block) in pending_blocks.into_iter().take(count) {
+        let peers_with_current_block = torrent_state
+            .peers
+            .iter_mut()
+            .filter(|(_peer_id, peer)| {
+                peer.control_rx.is_some()
+                    && peer.state.is_some()
+                    && !peer.state.as_ref().unwrap().choked
+                    && peer.state.as_ref().unwrap().bitfield.is_some()
+                    && peer.state.as_ref().unwrap().bitfield.as_ref().unwrap()[block.piece_index]
+            })
+            .collect::<Vec<(&String, &mut models::Peer)>>();
+        if peers_with_current_block.len() < MIN_PEERS_FOR_DOWNLOAD {
+            torrent_state
+                .peers
+                .iter_mut()
+                .filter(|(_peer_id, peer)| {
+                    peer.control_rx.is_none()
+                        && (peer.last_initiated_at.is_none()
+                            || SystemTime::now()
+                                .duration_since(*peer.last_initiated_at.as_ref().unwrap())
+                                .unwrap()
+                                > Duration::from_millis(PEER_REQUEST_TIMEOUT_MS))
+                })
+                .take(concurrent_peers)
+                .for_each(|(_peer_id, peer)| {
+                    let event_tx = event_tx.clone();
+                    let ip = peer.ip.clone();
+                    let port = peer.port;
+                    let torrent_info_hash = torrent_state.meta.info_hash;
+                    let client_peer_id = torrent_state.client_id;
+                    let pieces_count = torrent_state.meta.pieces.len();
+                    peer.handle = Some(thread::spawn(move || {
+                        peer_copy::PeerConnection::new(ip, port, event_tx)
+                            .activate(torrent_info_hash, client_peer_id, pieces_count)
+                            .unwrap()
+                            .start_exchange()
+                            .unwrap();
+                    }));
+                    peer.last_initiated_at = Some(SystemTime::now());
+                });
+        } else {
+            for (_peer_id, peer) in peers_with_current_block {
+                // Request a block with only one peer unless we are in end-game
+                match peer.control_rx.as_ref().unwrap().send(
+                    models::PeerControlCommand::PieceBlockRequest(
+                        block.piece_index,
+                        block.begin,
+                        block.length,
+                    ),
+                ) {
+                    // Peer has become unreachabnle,
+                    Ok(_) => {
+                        block.last_requested_at = Some(SystemTime::now());
+                        if !end_game_mode {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        peer.control_rx = None;
+                        peer.state = None;
+                    }
                 }
             }
         }
