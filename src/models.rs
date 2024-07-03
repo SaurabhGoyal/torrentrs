@@ -105,7 +105,6 @@ pub struct TorrentState {
     pub meta: MetaInfo,
     pub client_id: [u8; PEER_ID_BYTE_LEN],
     pub dest_path: PathBuf,
-    pub temp_prefix_path: PathBuf,
     pub files: Vec<Arc<RwLock<File>>>,
     pub pieces: Vec<Arc<RwLock<Piece>>>,
     pub blocks: HashMap<String, Arc<RwLock<Block>>>,

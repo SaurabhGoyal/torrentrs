@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::Duration,
 };
 
 use crate::models;
@@ -19,8 +20,7 @@ pub struct PeerConnection {
     ip: String,
     port: u16,
     stream: TcpStream,
-    event_tx: Arc<Mutex<Sender<models::TorrentEvent>>>,
-    control_rx: Arc<Mutex<Receiver<models::PeerControlCommand>>>,
+    event_tx: Sender<models::TorrentEvent>,
 }
 
 #[derive(Debug)]
@@ -31,25 +31,17 @@ pub struct PeerActiveConnection {
 }
 
 impl PeerConnection {
-    pub fn new(ip: String, port: u16, event_tx: Arc<Mutex<Sender<models::TorrentEvent>>>) -> Self {
-        let stream =
-            TcpStream::connect(SocketAddr::new(ip.parse::<IpAddr>().unwrap(), port)).unwrap();
-        let (control_tx, control_rx) = channel::<models::PeerControlCommand>();
-        event_tx
-            .lock()
-            .unwrap()
-            .send(models::TorrentEvent::Peer(
-                ip.clone(),
-                port,
-                models::PeerEvent::Control(control_tx),
-            ))
-            .unwrap();
+    pub fn new(ip: String, port: u16, event_tx: Sender<models::TorrentEvent>) -> Self {
+        let stream = TcpStream::connect_timeout(
+            &SocketAddr::new(ip.parse::<IpAddr>().unwrap(), port),
+            Duration::from_millis(5000),
+        )
+        .unwrap();
         PeerConnection {
             ip: ip.clone(),
             port,
             stream,
             event_tx,
-            control_rx: Arc::new(Mutex::new(control_rx)),
         }
     }
 
@@ -187,8 +179,6 @@ impl PeerActiveConnection {
                                 let data = msg_buf[8..msg_len].to_owned();
                                 self.peer_conn
                                     .event_tx
-                                    .lock()
-                                    .unwrap()
                                     .send(models::TorrentEvent::Block(piece_index, begin, data))
                                     .unwrap();
                             }
@@ -203,8 +193,11 @@ impl PeerActiveConnection {
     }
 
     fn start_writer(&self, mut stream: TcpStream) -> Result<(), io::Error> {
+        self.log("writer initialising");
+        let (control_tx, control_rx) = channel::<models::PeerControlCommand>();
+        self.send_peer_event(models::PeerEvent::Control(control_tx));
         self.log("writer started");
-        while let Ok(cmd) = self.peer_conn.control_rx.lock().unwrap().recv() {
+        while let Ok(cmd) = control_rx.recv() {
             self.log(format!("received cmd: [{:?}]", cmd).as_str());
             match cmd {
                 models::PeerControlCommand::PieceBlockRequest(index, begin, length) => {
@@ -226,17 +219,19 @@ impl PeerActiveConnection {
         println!("{}:{}: {msg}", self.peer_conn.ip, self.peer_conn.port);
     }
 
-    fn send_state_event(&self, event: models::PeerStateEvent) {
+    fn send_peer_event(&self, event: models::PeerEvent) {
         self.peer_conn
             .event_tx
-            .lock()
-            .unwrap()
             .send(models::TorrentEvent::Peer(
                 self.peer_conn.ip.clone(),
                 self.peer_conn.port,
-                models::PeerEvent::State(event),
+                event,
             ))
             .unwrap();
+    }
+
+    fn send_state_event(&self, event: models::PeerStateEvent) {
+        self.send_peer_event(models::PeerEvent::State(event));
     }
 
     fn mark_choked(&self, choked: bool) {

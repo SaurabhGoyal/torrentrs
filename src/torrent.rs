@@ -23,11 +23,11 @@ use crate::peer_copy;
 use crate::utils;
 
 const MAX_BLOCK_LENGTH: usize = 1 << 14;
-const MAX_CONCURRENT_BLOCKS: usize = 300;
+const MAX_CONCURRENT_BLOCKS: usize = 30;
 const MIN_PEERS_FOR_DOWNLOAD: usize = 1;
-const BLOCK_REQUEST_TIMEOUT_MS: u64 = 60000;
-const PEER_REQUEST_TIMEOUT_MS: u64 = 60000;
-const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 10000;
+const BLOCK_REQUEST_TIMEOUT_MS: u64 = 10000;
+const PEER_REQUEST_TIMEOUT_MS: u64 = 10000;
+const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 1000;
 
 #[derive(Debug)]
 pub enum TorrentError {
@@ -54,7 +54,6 @@ pub fn start(
     let torrent_state_block_scheduler = torrent_state.clone();
     let torrent_state_event_processor = torrent_state.clone();
     let (event_tx, event_rx) = channel::<models::TorrentEvent>();
-    let event_tx = Arc::new(Mutex::new(event_tx));
     let block_scheduler_handle = thread::spawn(move || {
         start_block_scheduler(torrent_state_block_scheduler, event_tx);
     });
@@ -148,13 +147,9 @@ fn build_torrent_state(
         // If we have hit file boundary, add file and move file cursor.
         if file_budget == 0 {
             block_ids.sort();
-            let mut file_path = meta.files[file_index].relative_path.clone();
-            if let Some(dir_path) = meta.directory.as_ref() {
-                file_path = dir_path.join(file_path);
-            }
             files.push(Arc::new(RwLock::new(models::File {
                 index: file_index,
-                relative_path: file_path,
+                relative_path: meta.files[file_index].relative_path.clone(),
                 length: meta.files[file_index].length as usize,
                 block_ids: block_ids.clone(),
                 path: None,
@@ -183,16 +178,14 @@ fn build_torrent_state(
             )
         })
         .collect::<HashMap<String, Arc<RwLock<models::Peer>>>>();
-    let dest_path = PathBuf::from(dest_path);
-    let temp_prefix_path = dest_path.join(format!(
-        ".tmp_{}",
-        utils::bytes_to_hex_encoding(&meta.info_hash)
-    ));
+    let mut dest_path = PathBuf::from(dest_path);
+    if let Some(dir_path) = meta.directory.as_ref() {
+        dest_path = dest_path.join(dir_path);
+    }
     models::TorrentState {
         meta,
         client_id,
         dest_path,
-        temp_prefix_path,
         files,
         pieces,
         blocks,
@@ -202,7 +195,7 @@ fn build_torrent_state(
 
 fn start_block_scheduler(
     torrent_state: Arc<models::TorrentState>,
-    event_tx: Arc<Mutex<Sender<models::TorrentEvent>>>,
+    event_tx: Sender<models::TorrentEvent>,
 ) {
     let mut end_game_mode = false;
     let mut concurrent_peers = 3;
@@ -344,8 +337,6 @@ fn start_block_scheduler(
 
             if pending_blocks.is_empty() {
                 println!("all blocks downloaded, closing writer");
-                // Delete tmp data
-                fs::remove_dir_all(torrent_state.temp_prefix_path.as_path()).unwrap();
                 // Close all peer connections
                 for (_peer_id, peer) in torrent_state
                     .peers
@@ -354,11 +345,11 @@ fn start_block_scheduler(
                 {
                     let mut peer = peer.write().unwrap();
                     //  This will close the peer stream, which will close peer listener.
-                    peer.control_rx
+                    let _ = peer
+                        .control_rx
                         .as_ref()
                         .unwrap()
-                        .send(models::PeerControlCommand::Shutdown)
-                        .unwrap();
+                        .send(models::PeerControlCommand::Shutdown);
                     //  This will close the peer writer.
                     peer.control_rx = None;
                     peer.state = None;
@@ -371,8 +362,7 @@ fn start_block_scheduler(
                 {
                     let mut peer = peer.write().unwrap();
                     let handle = peer.handle.take().unwrap();
-                    //  This will close the peer stream, which will close peer listener.
-                    handle.join().unwrap();
+                    let _ = handle.join();
                 }
                 return;
             } else {
@@ -381,12 +371,6 @@ fn start_block_scheduler(
                     completed_blocks.len(),
                     completed_blocks.len() + pending_blocks.len()
                 );
-                if completed_blocks.len() < 50 {
-                    println!("{:?} are complete", completed_blocks);
-                }
-                if pending_blocks.len() < 50 {
-                    println!("{:?} are pending", pending_blocks);
-                }
                 if pending_blocks.len() < 3 {
                     end_game_mode = true;
                     concurrent_peers = 10;
@@ -402,10 +386,12 @@ fn start_event_processor(
     event_rx: Receiver<models::TorrentEvent>,
 ) {
     let piece_count = torrent_state.meta.pieces.len();
-    fs::create_dir_all(torrent_state.temp_prefix_path.as_path()).unwrap();
-    if let Some(dir_path) = torrent_state.meta.directory.as_ref() {
-        fs::create_dir_all(dir_path.as_path()).unwrap();
-    }
+    let temp_prefix_path = torrent_state.dest_path.join(format!(
+        ".tmp_{}",
+        utils::bytes_to_hex_encoding(&torrent_state.meta.info_hash)
+    ));
+    // Create destination directory and a temporary directory inside it for holding the blocks.
+    fs::create_dir_all(temp_prefix_path.as_path()).unwrap();
     while let Ok(event) = event_rx.recv() {
         match event {
             models::TorrentEvent::Peer(ip, port, event) => {
@@ -467,7 +453,7 @@ fn start_event_processor(
                     continue;
                 }
                 drop(block);
-                let block_path = torrent_state.temp_prefix_path.join(block_id.as_str());
+                let block_path = temp_prefix_path.join(block_id.as_str());
                 let _wb = fs::OpenOptions::new()
                     .create_new(true)
                     .write(true)
@@ -521,6 +507,14 @@ fn start_event_processor(
                     drop(file);
                     println!("Written file {} to {:?}", file_index, file_path);
                     torrent_state.files[file_index].write().unwrap().path = Some(file_path);
+                }
+                if torrent_state
+                    .files
+                    .iter()
+                    .all(|file| file.read().unwrap().path.is_some())
+                {
+                    // Delete temp directory
+                    fs::remove_dir_all(temp_prefix_path.as_path()).unwrap();
                 }
             }
         }
