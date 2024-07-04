@@ -28,37 +28,44 @@ const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
 const MAX_EVENTS_PER_CYCLE: i32 = 10000;
 
 #[derive(Debug)]
-pub struct TorrentController {
+pub struct Controller {
     torrent: Torrent,
-    event_tx: Sender<TorrentControllerEvent>,
+    event_tx: Sender<ControllerEvent>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TorrentState {
+pub struct State {
     pub files_total: usize,
     pub files_completed: usize,
     pub blocks_total: usize,
     pub blocks_completed: usize,
     pub peers_total: usize,
     pub peers_connected: usize,
+    pub downloaded_window_second: (u64, usize),
 }
 
 #[derive(Debug)]
-pub enum TorrentControlCommand {
+pub enum ControlCommand {
     Start,
     Pause,
     Stop,
 }
 
 #[derive(Debug)]
-pub enum TorrentEvent {
-    State(TorrentState),
+pub enum Metric {
+    DownloadWindowSecond(u64, usize),
 }
 
 #[derive(Debug)]
-pub struct TorrentControllerEvent {
+pub enum Event {
+    State(State),
+    Metric(Metric),
+}
+
+#[derive(Debug)]
+pub struct ControllerEvent {
     pub hash: [u8; PEER_ID_BYTE_LEN],
-    pub event: TorrentEvent,
+    pub event: Event,
 }
 
 #[derive(Debug)]
@@ -91,8 +98,8 @@ struct Block {
 struct Peer {
     ip: String,
     port: u16,
-    control_rx: Option<Sender<peer::PeerControlCommand>>,
-    state: Option<peer::PeerState>,
+    control_rx: Option<Sender<peer::ControlCommand>>,
+    state: Option<peer::State>,
     handle: Option<JoinHandle<()>>,
     last_initiated_at: Option<SystemTime>,
 }
@@ -108,15 +115,16 @@ struct Torrent {
     pieces: Vec<Piece>,
     blocks: HashMap<String, Block>,
     peers: Option<HashMap<String, Peer>>,
+    downloaded_window_second: (u64, usize),
 }
 
-impl TorrentController {
+impl Controller {
     pub fn new(
         meta: &bencode::MetaInfo,
         client_id: [u8; PEER_ID_BYTE_LEN],
         dest_path: &str,
-        event_tx: Sender<TorrentControllerEvent>,
-    ) -> (Self, Sender<TorrentControlCommand>) {
+        event_tx: Sender<ControllerEvent>,
+    ) -> (Self, Sender<ControlCommand>) {
         let piece_standard_length = meta.pieces[0].length;
         let mut piece_budget = piece_standard_length;
         let mut file_budget = meta.files[0].length as usize;
@@ -185,7 +193,7 @@ impl TorrentController {
         if let Some(dir_path) = meta.directory.as_ref() {
             dest_path = dest_path.join(dir_path);
         }
-        let (controller_tx, controller_rx) = channel::<TorrentControlCommand>();
+        let (controller_tx, controller_rx) = channel::<ControlCommand>();
         let torrent = Torrent {
             client_id,
             dest_path,
@@ -196,6 +204,7 @@ impl TorrentController {
             pieces,
             blocks,
             peers: None,
+            downloaded_window_second: (0, 0),
         };
 
         (Self { torrent, event_tx }, controller_tx)
@@ -207,7 +216,7 @@ impl TorrentController {
         }
         let mut end_game_mode = false;
         let mut concurrent_peers = 3;
-        let (event_tx, event_rx) = channel::<peer::PeerControllerEvent>();
+        let (event_tx, event_rx) = channel::<peer::ControllerEvent>();
         let temp_prefix_path = self.torrent.dest_path.join(format!(
             ".tmp_{}",
             utils::bytes_to_hex_encoding(&self.torrent.hash)
@@ -286,7 +295,7 @@ impl TorrentController {
                     {
                         if let Some(control_rx) = peer.control_rx.as_ref() {
                             //  This will close the peer stream, which will close peer listener.
-                            let _ = control_rx.send(peer::PeerControlCommand::Shutdown);
+                            let _ = control_rx.send(peer::ControlCommand::Shutdown);
                         }
                         //  This will close the peer writer.
                         peer.control_rx = None;
@@ -344,7 +353,7 @@ impl TorrentController {
             .collect::<HashMap<String, Peer>>()
     }
 
-    fn process_event(&mut self, event: peer::PeerControllerEvent, temp_prefix_path: &Path) {
+    fn process_event(&mut self, event: peer::ControllerEvent, temp_prefix_path: &Path) {
         let piece_count = self.torrent.pieces.len();
         let peer_id = get_peer_id(event.ip.as_str(), event.port);
         let peer = self
@@ -355,15 +364,15 @@ impl TorrentController {
             .get_mut(peer_id.as_str())
             .unwrap();
         match event.event {
-            peer::PeerEvent::Control(control_rx) => peer.control_rx = Some(control_rx),
-            peer::PeerEvent::State(event) => match (event, peer.state.as_mut()) {
-                (peer::PeerStateEvent::Init(state), None) => {
+            peer::Event::Control(control_rx) => peer.control_rx = Some(control_rx),
+            peer::Event::State(event) => match (event, peer.state.as_mut()) {
+                (peer::StateEvent::Init(state), None) => {
                     peer.state = Some(state);
                 }
-                (peer::PeerStateEvent::FieldChoked(choked), Some(state)) => {
+                (peer::StateEvent::FieldChoked(choked), Some(state)) => {
                     state.choked = choked;
                 }
-                (peer::PeerStateEvent::FieldHave(index), Some(state)) => {
+                (peer::StateEvent::FieldHave(index), Some(state)) => {
                     let state_bitfield = state.bitfield.get_or_insert(vec![false; piece_count]);
                     let had = state_bitfield[index];
                     state_bitfield[index] = true;
@@ -371,7 +380,7 @@ impl TorrentController {
                         self.torrent.pieces[index].have += 1;
                     }
                 }
-                (peer::PeerStateEvent::FieldBitfield(bitfield), Some(state)) => {
+                (peer::StateEvent::FieldBitfield(bitfield), Some(state)) => {
                     let state_bitfield = state.bitfield.get_or_insert(vec![false; piece_count]);
                     let mut impacted_piece_indices = vec![];
                     for index in 0..piece_count {
@@ -391,7 +400,7 @@ impl TorrentController {
                 }
                 _ => {}
             },
-            peer::PeerEvent::Block(piece_index, begin, data) => {
+            peer::Event::Block(piece_index, begin, data) => {
                 let block_id = get_block_id(piece_index, begin);
                 let block = self.torrent.blocks.get_mut(&block_id).unwrap();
                 let file_index = block.file_index;
@@ -440,12 +449,22 @@ impl TorrentController {
                 }
                 self.send_torrent_controller_event();
             }
+            peer::Event::Metric(event) => match event {
+                peer::Metric::DownloadWindowSecond(second_window, downloaded_bytes) => {
+                    if second_window == self.torrent.downloaded_window_second.0 {
+                        self.torrent.downloaded_window_second.1 += downloaded_bytes;
+                    } else if second_window > self.torrent.downloaded_window_second.0 {
+                        self.torrent.downloaded_window_second.0 = second_window;
+                        self.torrent.downloaded_window_second.1 = downloaded_bytes;
+                    }
+                }
+            },
         }
     }
 
     fn enqueue_pending_blocks_to_peers(
         &mut self,
-        event_tx: Sender<peer::PeerControllerEvent>,
+        event_tx: Sender<peer::ControllerEvent>,
         count: usize,
         end_game_mode: bool,
         concurrent_peers: usize,
@@ -505,7 +524,7 @@ impl TorrentController {
                         let client_peer_id = self.torrent.client_id;
                         let pieces_count = self.torrent.pieces.len();
                         peer.handle = Some(thread::spawn(move || {
-                            if let Ok(peer_controller) = peer::PeerController::new(
+                            if let Ok(peer_controller) = peer::Controller::new(
                                 ip,
                                 port,
                                 event_tx,
@@ -522,7 +541,7 @@ impl TorrentController {
                 for (_peer_id, peer) in peers_with_current_block {
                     // Request a block with only one peer unless we are in end-game
                     match peer.control_rx.as_ref().unwrap().send(
-                        peer::PeerControlCommand::PieceBlockRequest(
+                        peer::ControlCommand::PieceBlockRequest(
                             block.piece_index,
                             block.begin,
                             block.length,
@@ -547,9 +566,9 @@ impl TorrentController {
 
     fn send_torrent_controller_event(&self) {
         self.event_tx
-            .send(TorrentControllerEvent {
+            .send(ControllerEvent {
                 hash: self.torrent.hash,
-                event: TorrentEvent::State(TorrentState {
+                event: Event::State(State {
                     files_total: self.torrent.files.len(),
                     files_completed: self
                         .torrent
@@ -573,9 +592,21 @@ impl TorrentController {
                         .iter()
                         .filter(|(_, p)| p.control_rx.is_some())
                         .count(),
+                    downloaded_window_second: self.torrent.downloaded_window_second,
                 }),
             })
             .unwrap();
+        if self.torrent.downloaded_window_second.0 > 0 {
+            self.event_tx
+                .send(ControllerEvent {
+                    hash: self.torrent.hash,
+                    event: Event::Metric(Metric::DownloadWindowSecond(
+                        self.torrent.downloaded_window_second.0,
+                        self.torrent.downloaded_window_second.1,
+                    )),
+                })
+                .unwrap();
+        }
     }
 }
 

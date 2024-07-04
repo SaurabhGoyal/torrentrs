@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 const HANSHAKE_PSTR_LEN: &[u8] = &[19];
@@ -14,54 +14,60 @@ const HANSHAKE_PSTR: &[u8] = "BitTorrent protocol".as_bytes();
 const HANSHAKE_RESTRICTED: &[u8] = &[0_u8; 8];
 
 #[derive(Debug, Clone)]
-pub struct PeerState {
+pub struct State {
     pub handshake: bool,
     pub choked: bool,
     pub interested: bool,
     pub bitfield: Option<Vec<bool>>,
+    pub total_downloaded: usize,
+    pub downloaded_window_second: (u64, usize),
 }
 
-pub enum PeerStateEvent {
-    ConnectionError(Error),
-    Init(PeerState),
+pub enum StateEvent {
+    Init(State),
     FieldChoked(bool),
     FieldHave(usize),
     FieldBitfield(Vec<bool>),
 }
 
+pub enum Metric {
+    DownloadWindowSecond(u64, usize),
+}
+
 #[derive(Debug)]
-pub enum PeerControlCommand {
+pub enum ControlCommand {
     PieceBlockRequest(usize, usize, usize),
     Shutdown,
 }
 
-pub enum PeerEvent {
-    Control(Sender<PeerControlCommand>),
-    State(PeerStateEvent),
+pub enum Event {
+    Control(Sender<ControlCommand>),
+    State(StateEvent),
     Block(usize, usize, Vec<u8>),
+    Metric(Metric),
 }
 
-pub struct PeerControllerEvent {
+pub struct ControllerEvent {
     pub ip: String,
     pub port: u16,
-    pub event: PeerEvent,
+    pub event: Event,
 }
 
 #[derive(Debug)]
-pub struct PeerController {
+pub struct Controller {
     ip: String,
     port: u16,
     stream: TcpStream,
-    event_tx: Sender<PeerControllerEvent>,
-    peer_state: Arc<Mutex<PeerState>>,
+    event_tx: Sender<ControllerEvent>,
+    peer_state: Arc<Mutex<State>>,
     piece_count: usize,
 }
 
-impl PeerController {
+impl Controller {
     pub fn new(
         ip: String,
         port: u16,
-        event_tx: Sender<PeerControllerEvent>,
+        event_tx: Sender<ControllerEvent>,
         torrent_info_hash: [u8; 20],
         client_peer_id: [u8; 20],
         piece_count: usize,
@@ -88,20 +94,22 @@ impl PeerController {
         let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 1_u8])?;
         // Send interested message.
         let _ = stream.write(&[0_u8, 0_u8, 0_u8, 1_u8, 2_u8])?;
-        let peer_controller = PeerController {
+        let peer_controller = Controller {
             ip,
             port,
             stream,
             event_tx,
-            peer_state: Arc::new(Mutex::new(PeerState {
+            peer_state: Arc::new(Mutex::new(State {
                 handshake: true,
                 choked: true,
                 interested: true,
                 bitfield: None,
+                total_downloaded: 0,
+                downloaded_window_second: (0, 0),
             })),
             piece_count,
         };
-        peer_controller.send_event(PeerEvent::State(PeerStateEvent::Init(
+        peer_controller.send_event(Event::State(StateEvent::Init(
             peer_controller.peer_state.lock().unwrap().clone(),
         )));
         Ok(peer_controller)
@@ -189,7 +197,24 @@ impl PeerController {
                                 let piece_index = u32::from_be_bytes(index_buf) as usize;
                                 let begin = u32::from_be_bytes(begin_buf) as usize;
                                 let data = msg_buf[8..msg_len].to_owned();
-                                self.send_event(PeerEvent::Block(piece_index, begin, data));
+                                self.send_event(Event::Block(piece_index, begin, data));
+                                let second_window = SystemTime::now()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                {
+                                    let mut state = self.peer_state.lock().unwrap();
+                                    if state.downloaded_window_second.0 == second_window {
+                                        state.downloaded_window_second.1 += msg_len - 8;
+                                    } else if state.downloaded_window_second.0 < second_window {
+                                        state.downloaded_window_second =
+                                            (second_window, msg_len - 8);
+                                    }
+                                    self.send_event(Event::Metric(Metric::DownloadWindowSecond(
+                                        state.downloaded_window_second.0,
+                                        state.downloaded_window_second.1,
+                                    )));
+                                }
                             }
                             _ => {}
                         }
@@ -203,16 +228,16 @@ impl PeerController {
 
     fn start_writer(&self, mut stream: TcpStream) -> Result<(), io::Error> {
         self.log("writer initialising");
-        let (control_tx, control_rx) = channel::<PeerControlCommand>();
-        self.send_event(PeerEvent::Control(control_tx));
+        let (control_tx, control_rx) = channel::<ControlCommand>();
+        self.send_event(Event::Control(control_tx));
         self.log("writer started");
         while let Ok(cmd) = control_rx.recv() {
             self.log(format!("received cmd: [{:?}]", cmd).as_str());
             match cmd {
-                PeerControlCommand::PieceBlockRequest(index, begin, length) => {
+                ControlCommand::PieceBlockRequest(index, begin, length) => {
                     self.request(&mut stream, index, begin, length)?;
                 }
-                PeerControlCommand::Shutdown => {
+                ControlCommand::Shutdown => {
                     stream.shutdown(std::net::Shutdown::Both)?;
                 }
             }
@@ -225,9 +250,9 @@ impl PeerController {
         // println!("{}:{}: {msg}", self.ip, self.port);
     }
 
-    fn send_event(&self, event: PeerEvent) {
+    fn send_event(&self, event: Event) {
         self.event_tx
-            .send(PeerControllerEvent {
+            .send(ControllerEvent {
                 ip: self.ip.clone(),
                 port: self.port,
                 event,
@@ -237,7 +262,7 @@ impl PeerController {
 
     fn mark_choked(&self, choked: bool) {
         self.peer_state.lock().unwrap().choked = choked;
-        self.send_event(PeerEvent::State(PeerStateEvent::FieldChoked(choked)));
+        self.send_event(Event::State(StateEvent::FieldChoked(choked)));
     }
 
     fn set_peer_bitfield_index(&self, index: usize) {
@@ -245,7 +270,7 @@ impl PeerController {
             self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
         }
         self.peer_state.lock().unwrap().bitfield.as_mut().unwrap()[index] = true;
-        self.send_event(PeerEvent::State(PeerStateEvent::FieldHave(index)));
+        self.send_event(Event::State(StateEvent::FieldHave(index)));
     }
 
     fn set_peer_bitfield(&self, bitfield: Vec<bool>) {
@@ -259,9 +284,7 @@ impl PeerController {
             .as_mut()
             .unwrap()
             .copy_from_slice(&bitfield[..self.piece_count]);
-        self.send_event(PeerEvent::State(PeerStateEvent::FieldBitfield(
-            bitfield.clone(),
-        )));
+        self.send_event(Event::State(StateEvent::FieldBitfield(bitfield.clone())));
     }
 
     fn request(

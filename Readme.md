@@ -26,7 +26,7 @@ Single torrent level
 - [x] Parse bencoding to know tracker, files and pieces.
 - [x] Connect with tracker URL to get list of peers.
 - [x] Connect with peers to request pieces.
-- [ ] Download pieces, check integrity and write bytes to the disk.
+- [x] Download pieces, check integrity and write bytes to the disk.
 - [ ] On completion, verify integrity of whole data.
 - [ ] Seed.
 
