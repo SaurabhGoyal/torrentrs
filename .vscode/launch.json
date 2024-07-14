@@ -1,0 +1,48 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'torrentrs'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=torrentrs",
+                    "--package=torrentrs"
+                ],
+                "filter": {
+                    "name": "torrentrs",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "sample_torrents/sample.torrent",
+                "local/test2",
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'torrentrs'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=torrentrs",
+                    "--package=torrentrs"
+                ],
+                "filter": {
+                    "name": "torrentrs",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+    ]
+}

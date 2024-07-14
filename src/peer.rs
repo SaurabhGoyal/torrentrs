@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Error, Read, Write},
+    io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     sync::{
         mpsc::{channel, Sender},
@@ -15,9 +15,7 @@ const HANSHAKE_RESTRICTED: &[u8] = &[0_u8; 8];
 
 #[derive(Debug, Clone)]
 pub struct State {
-    pub handshake: bool,
     pub choked: bool,
-    pub interested: bool,
     pub bitfield: Option<Vec<bool>>,
     pub total_downloaded: usize,
     pub downloaded_window_second: (u64, usize),
@@ -71,9 +69,9 @@ impl Controller {
         torrent_info_hash: [u8; 20],
         client_peer_id: [u8; 20],
         piece_count: usize,
-    ) -> Result<Self, io::Error> {
+    ) -> anyhow::Result<Self> {
         let mut stream = TcpStream::connect_timeout(
-            &SocketAddr::new(ip.parse::<IpAddr>().unwrap(), port),
+            &SocketAddr::new(ip.parse::<IpAddr>()?, port),
             Duration::from_millis(5000),
         )?;
         let mut handshake_msg = [
@@ -100,9 +98,7 @@ impl Controller {
             stream,
             event_tx,
             peer_state: Arc::new(Mutex::new(State {
-                handshake: true,
                 choked: true,
-                interested: true,
                 bitfield: None,
                 total_downloaded: 0,
                 downloaded_window_second: (0, 0),
@@ -111,34 +107,33 @@ impl Controller {
         };
         peer_controller.send_event(Event::State(StateEvent::Init(
             peer_controller.peer_state.lock().unwrap().clone(),
-        )));
+        )))?;
         Ok(peer_controller)
     }
 
-    pub fn start(self) -> Result<(), io::Error> {
-        let listener_stream = self.stream.try_clone().unwrap();
-        let writer_stream = self.stream.try_clone().unwrap();
+    pub fn start(self) -> anyhow::Result<()> {
+        let listener_stream = self.stream.try_clone()?;
+        let writer_stream = self.stream.try_clone()?;
         let self_arc = Arc::new(self);
         let listener = self_arc.clone();
-        let listener_handle = thread::spawn(move || {
+        let listener_handle = thread::spawn(move || -> anyhow::Result<()> {
             listener.start_listener(listener_stream)?;
-            Ok::<(), io::Error>(())
+            Ok(())
         });
         let writer = self_arc.clone();
-        let writer_handle = thread::spawn(move || {
+        let writer_handle = thread::spawn(move || -> anyhow::Result<()> {
             writer.start_writer(writer_stream)?;
-            Ok::<(), io::Error>(())
+            Ok(())
         });
         listener_handle.join().unwrap()?;
         writer_handle.join().unwrap()?;
         Ok(())
     }
 
-    fn start_listener(&self, mut stream: TcpStream) -> Result<(), io::Error> {
+    fn start_listener(&self, mut stream: TcpStream) -> anyhow::Result<()> {
         let mut len_buf = [0_u8; 4];
         let max_size = 1 << 17;
         let bitfield_byte_count = (self.piece_count + 7) / 8;
-        self.log("listener started");
         loop {
             stream.read_exact(&mut len_buf)?;
             let len = u32::from_be_bytes(len_buf) as usize;
@@ -151,25 +146,19 @@ impl Controller {
                         let mut msg_type = [0_u8];
                         stream.read_exact(&mut msg_type)?;
                         match (len - 1, msg_type[0]) {
-                            (0, 0_u8) => self.mark_choked(true),
-                            (0, 1_u8) => self.mark_choked(false),
+                            (0, 0_u8) => {
+                                self.mark_choked(true)?;
+                            }
+                            (0, 1_u8) => {
+                                self.mark_choked(false)?;
+                            }
                             (4, 4_u8) => {
                                 let mut index_buf = [0_u8; 4];
                                 stream.read_exact(&mut index_buf)?;
                                 let index = u32::from_be_bytes(index_buf) as usize;
-                                self.set_peer_bitfield_index(index);
+                                self.set_peer_bitfield_index(index)?;
                             }
                             (_, 5_u8) => {
-                                if len - 1 != bitfield_byte_count {
-                                    self.log(
-                                        format!(
-                                            "extra bf msg size - ex - {} actu - {}, reading only till required bit-count",
-                                            bitfield_byte_count,
-                                            len - 1
-                                        )
-                                        .as_str(),
-                                    );
-                                }
                                 let mut bitfield_buf = vec![0_u8; len - 1];
                                 stream.read_exact(&mut bitfield_buf)?;
                                 let mut bitfield = vec![false; self.piece_count];
@@ -184,7 +173,7 @@ impl Controller {
                                         }
                                     }
                                 }
-                                self.set_peer_bitfield(bitfield);
+                                self.set_peer_bitfield(bitfield)?;
                             }
                             (8.., 7_u8) => {
                                 let msg_len = len - 1;
@@ -197,42 +186,37 @@ impl Controller {
                                 let piece_index = u32::from_be_bytes(index_buf) as usize;
                                 let begin = u32::from_be_bytes(begin_buf) as usize;
                                 let data = msg_buf[8..msg_len].to_owned();
-                                self.send_event(Event::Block(piece_index, begin, data));
+                                self.send_event(Event::Block(piece_index, begin, data))?;
                                 let second_window = SystemTime::now()
-                                    .duration_since(SystemTime::UNIX_EPOCH)
-                                    .unwrap()
+                                    .duration_since(SystemTime::UNIX_EPOCH)?
                                     .as_secs();
                                 {
                                     let mut state = self.peer_state.lock().unwrap();
+                                    let data_len = msg_len - 8;
                                     if state.downloaded_window_second.0 == second_window {
-                                        state.downloaded_window_second.1 += msg_len - 8;
+                                        state.downloaded_window_second.1 += data_len;
                                     } else if state.downloaded_window_second.0 < second_window {
-                                        state.downloaded_window_second =
-                                            (second_window, msg_len - 8);
+                                        state.downloaded_window_second = (second_window, data_len);
                                     }
+                                    state.total_downloaded += data_len;
                                     self.send_event(Event::Metric(Metric::DownloadWindowSecond(
                                         state.downloaded_window_second.0,
                                         state.downloaded_window_second.1,
-                                    )));
+                                    )))?;
                                 }
                             }
                             _ => {}
                         }
                     }
-                    _ => {}
                 }
             }
         }
-        Ok(())
     }
 
-    fn start_writer(&self, mut stream: TcpStream) -> Result<(), io::Error> {
-        self.log("writer initialising");
+    fn start_writer(&self, mut stream: TcpStream) -> anyhow::Result<()> {
         let (control_tx, control_rx) = channel::<ControlCommand>();
-        self.send_event(Event::Control(control_tx));
-        self.log("writer started");
+        self.send_event(Event::Control(control_tx))?;
         while let Ok(cmd) = control_rx.recv() {
-            self.log(format!("received cmd: [{:?}]", cmd).as_str());
             match cmd {
                 ControlCommand::PieceBlockRequest(index, begin, length) => {
                     self.request(&mut stream, index, begin, length)?;
@@ -241,50 +225,44 @@ impl Controller {
                     stream.shutdown(std::net::Shutdown::Both)?;
                 }
             }
-            self.log(format!("executed cmd: [{:?}]", cmd).as_str());
         }
         Ok(())
     }
 
-    fn log(&self, msg: &str) {
-        // println!("{}:{}: {msg}", self.ip, self.port);
+    fn send_event(&self, event: Event) -> anyhow::Result<()> {
+        self.event_tx.send(ControllerEvent {
+            ip: self.ip.clone(),
+            port: self.port,
+            event,
+        })?;
+        Ok(())
     }
 
-    fn send_event(&self, event: Event) {
-        self.event_tx
-            .send(ControllerEvent {
-                ip: self.ip.clone(),
-                port: self.port,
-                event,
-            })
-            .unwrap();
-    }
-
-    fn mark_choked(&self, choked: bool) {
+    fn mark_choked(&self, choked: bool) -> anyhow::Result<()> {
         self.peer_state.lock().unwrap().choked = choked;
-        self.send_event(Event::State(StateEvent::FieldChoked(choked)));
+        self.send_event(Event::State(StateEvent::FieldChoked(choked)))
     }
 
-    fn set_peer_bitfield_index(&self, index: usize) {
-        if self.peer_state.lock().unwrap().bitfield.is_none() {
-            self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
+    fn set_peer_bitfield_index(&self, index: usize) -> anyhow::Result<()> {
+        let mut peer_state = self.peer_state.lock().unwrap();
+        if peer_state.bitfield.is_none() {
+            peer_state.bitfield = Some(vec![false; self.piece_count]);
         }
-        self.peer_state.lock().unwrap().bitfield.as_mut().unwrap()[index] = true;
-        self.send_event(Event::State(StateEvent::FieldHave(index)));
+        peer_state.bitfield.as_mut().unwrap()[index] = true;
+        self.send_event(Event::State(StateEvent::FieldHave(index)))
     }
 
-    fn set_peer_bitfield(&self, bitfield: Vec<bool>) {
-        if self.peer_state.lock().unwrap().bitfield.is_none() {
-            self.peer_state.lock().unwrap().bitfield = Some(vec![false; self.piece_count]);
+    fn set_peer_bitfield(&self, bitfield: Vec<bool>) -> anyhow::Result<()> {
+        let mut peer_state = self.peer_state.lock().unwrap();
+        if peer_state.bitfield.is_none() {
+            peer_state.bitfield = Some(vec![false; self.piece_count]);
         }
-        self.peer_state
-            .lock()
-            .unwrap()
+        peer_state
             .bitfield
             .as_mut()
             .unwrap()
             .copy_from_slice(&bitfield[..self.piece_count]);
-        self.send_event(Event::State(StateEvent::FieldBitfield(bitfield.clone())));
+        self.send_event(Event::State(StateEvent::FieldBitfield(bitfield.clone())))
     }
 
     fn request(
@@ -293,7 +271,7 @@ impl Controller {
         index: usize,
         begin: usize,
         length: usize,
-    ) -> Result<(), io::Error> {
+    ) -> anyhow::Result<()> {
         let mut msg = [0_u8; 17];
         msg[0..4].copy_from_slice(&[0_u8, 0_u8, 0_u8, 0xd_u8]);
         msg[4..5].copy_from_slice(&[6_u8]);

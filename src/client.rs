@@ -71,7 +71,7 @@ impl Client {
         )
     }
 
-    pub fn start(&mut self) -> ! {
+    pub fn start(&mut self) -> anyhow::Result<()> {
         loop {
             {
                 // Process commands
@@ -97,7 +97,7 @@ impl Client {
                 loop {
                     match self.event_rx.try_recv() {
                         Ok(event) => {
-                            self.process_event(event);
+                            self.process_event(event)?;
                             processed_events += 1;
                             if processed_events > MAX_EVENTS_PER_CYCLE {
                                 break;
@@ -130,15 +130,16 @@ impl Client {
             }
             thread::sleep(Duration::from_millis(1000));
         }
+        Ok(())
     }
 
-    fn add_torrent(&mut self, file_path: &str, dest_path: &str) -> Result<(), io::Error> {
+    fn add_torrent(&mut self, file_path: &str, dest_path: &str) -> anyhow::Result<()> {
         // Read file
         let mut file = fs::OpenOptions::new().read(true).open(file_path)?;
         let mut buf: Vec<u8> = vec![];
         file.read_to_end(&mut buf)?;
         // Parse metadata_info
-        let metainfo = bencode::decode_metainfo(buf.as_slice());
+        let metainfo = bencode::decode_metainfo(buf.as_slice())?;
         let (mut torrent_controller, control_tx) =
             torrent::Controller::new(&metainfo, self.peer_id, dest_path, self.event_tx.clone());
         self.torrents.insert(
@@ -161,7 +162,7 @@ impl Client {
         Ok(())
     }
 
-    fn process_event(&mut self, event: ControllerEvent) {
+    fn process_event(&mut self, event: ControllerEvent) -> anyhow::Result<()> {
         let torrent = self.torrents.get_mut(&event.hash).unwrap();
         match (event.event, torrent.state.as_mut()) {
             (torrent::Event::State(state), _) => {
@@ -182,23 +183,24 @@ impl Client {
             },
             _ => {}
         }
-        clear_screen();
+        clear_screen()?;
         println!(
             "{}",
-            self.torrents.values().fold(String::new(), |mut out, ts| {
-                match ts.state.as_ref() {
-                    Some(tsu) => {
-                        let mut download_rate = String::from(" - ");
-                        if tsu.downloaded_window_second.0
-                            == SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
-                        {
-                            download_rate =
-                                format!("{} Kbps", tsu.downloaded_window_second.1 / 1024);
-                        }
-                        let _ = writeln!(
+            self.torrents.values().try_fold(
+                String::new(),
+                |mut out, ts| -> anyhow::Result<String> {
+                    match ts.state.as_ref() {
+                        Some(tsu) => {
+                            let mut download_rate = String::from(" - ");
+                            if tsu.downloaded_window_second.0
+                                == SystemTime::now()
+                                    .duration_since(SystemTime::UNIX_EPOCH)?
+                                    .as_secs()
+                            {
+                                download_rate =
+                                    format!("{} Kbps", tsu.downloaded_window_second.1 / 1024);
+                            }
+                            let _ = writeln!(
                             out,
                             "\n[{}] [{}]\n - Blocks - {}/{} ({}), Files - {}/{}, Peers - {}/{}\n",
                             if tsu.files_completed == tsu.files_total {
@@ -215,19 +217,22 @@ impl Client {
                             tsu.peers_connected,
                             tsu.peers_total
                         );
+                        }
+                        None => {
+                            let _ = writeln!(out, "\n[Fetching] [{}]\n -------------", ts.name,);
+                        }
                     }
-                    None => {
-                        let _ = writeln!(out, "\n[Fetching] [{}]\n -------------", ts.name,);
-                    }
+                    Ok(out)
                 }
-                out
-            })
+            )?
         );
+        Ok(())
     }
 }
 
-fn clear_screen() {
+fn clear_screen() -> anyhow::Result<()> {
     print!("{}[2J", 27 as char); // ANSI escape code to clear the screen
     print!("{}[1;1H", 27 as char); // ANSI escape code to move the cursor to the top-left corner
-    io::stdout().flush().unwrap(); // Flush stdout to ensure screen is cleared immediately
+    io::stdout().flush()?;
+    Ok(()) // Flush stdout to ensure screen is cleared immediately
 }

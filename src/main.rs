@@ -9,7 +9,7 @@ mod utils;
 fn main() {
     let args = env::args().collect::<Vec<String>>();
     let (mut client, control_tx) = client::Client::new();
-    let handle = thread::spawn(move || client.start());
+    let handle = thread::spawn(move || -> anyhow::Result<()> { client.start() });
     let mut index = 1;
     while index + 1 < args.len() {
         control_tx
@@ -20,5 +20,5 @@ fn main() {
             .unwrap();
         index += 2;
     }
-    handle.join().unwrap();
+    handle.join().unwrap().unwrap();
 }

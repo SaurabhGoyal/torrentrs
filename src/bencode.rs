@@ -60,7 +60,7 @@ pub struct MetaInfo {
     pub pieces: Vec<PieceInfo>,
 }
 
-pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
+pub fn decode_metainfo(metainfo: &[u8]) -> anyhow::Result<MetaInfo> {
     let mut decoder = Decoder::new(metainfo);
     let mut info_hash: Option<[u8; INFO_HASH_BYTE_LEN]> = None;
     let mut tracker: Option<&str> = None;
@@ -73,18 +73,17 @@ pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
         while let Ok(Some((key, value))) = metainfo_object.next_pair() {
             match (key, value) {
                 (ANNOUNCE_KEY, Object::Bytes(value)) => {
-                    tracker = Some(str::from_utf8(value).unwrap());
+                    tracker = Some(str::from_utf8(value)?);
                 }
                 (INFO_KEY, Object::Dict(mut value)) => {
                     while let Ok(Some((key, mut value))) = value.next_pair() {
                         match (key, value) {
                             (NAME_KEY, Object::Bytes(value)) => {
-                                primary_file_name = Some(
-                                    PathBuf::from_str(str::from_utf8(value).unwrap()).unwrap(),
-                                );
+                                primary_file_name =
+                                    Some(PathBuf::from_str(str::from_utf8(value)?)?);
                             }
                             (LENGTH_KEY, Object::Integer(value)) => {
-                                primary_file_length = Some(value.parse::<u64>().unwrap());
+                                primary_file_length = Some(value.parse::<u64>()?);
                             }
                             (FILES_KEY, Object::List(mut files_object)) => {
                                 while let Ok(Some(Object::Dict(mut file_object))) =
@@ -99,14 +98,13 @@ pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
                                                 while let Ok(Some(Object::Bytes(path_component))) =
                                                     path_components_obj.next_object()
                                                 {
-                                                    path_components.push(
-                                                        str::from_utf8(path_component).unwrap(),
-                                                    );
+                                                    path_components
+                                                        .push(str::from_utf8(path_component)?);
                                                 }
                                                 file_path = Some(path_components);
                                             }
                                             (LENGTH_KEY, Object::Integer(value)) => {
-                                                file_length = Some(value.parse::<u64>().unwrap());
+                                                file_length = Some(value.parse::<u64>()?);
                                             }
                                             _ => {}
                                         }
@@ -122,7 +120,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
                                 }
                             }
                             (PIECE_LENGTH_KEY, Object::Integer(value)) => {
-                                piece_length = Some(value.parse::<u32>().unwrap());
+                                piece_length = Some(value.parse::<u32>()?);
                             }
                             (PIECES_KEY, Object::Bytes(value)) => {
                                 let mut offset = 0;
@@ -157,7 +155,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
         }
         _ => {}
     }
-    MetaInfo {
+    Ok(MetaInfo {
         tracker: tracker.unwrap().to_string(),
         files,
         pieces: piece_hashes
@@ -169,10 +167,10 @@ pub fn decode_metainfo(metainfo: &[u8]) -> MetaInfo {
             .collect(),
         info_hash: info_hash.unwrap(),
         directory,
-    }
+    })
 }
 
-pub fn decode_peers(announce_response: &[u8]) -> Vec<PeerInfo> {
+pub fn decode_peers(announce_response: &[u8]) -> anyhow::Result<Vec<PeerInfo>> {
     let mut decoder = Decoder::new(announce_response);
     let mut peers: Vec<PeerInfo> = vec![];
     if let Ok(Some(decoding::Object::Dict(mut announce_object))) = decoder.next_object() {
@@ -188,12 +186,12 @@ pub fn decode_peers(announce_response: &[u8]) -> Vec<PeerInfo> {
                             while let Ok(Some((key, value))) = peer_object.next_pair() {
                                 if key == IP_KEY {
                                     if let Object::Bytes(value) = value {
-                                        ip = Some(str::from_utf8(value).unwrap().to_string());
+                                        ip = Some(str::from_utf8(value)?.to_string());
                                     }
                                 }
                                 if key == PORT_KEY {
                                     if let Object::Integer(value) = value {
-                                        port = Some(value.parse::<u16>().unwrap());
+                                        port = Some(value.parse::<u16>()?);
                                     }
                                 }
                             }
@@ -223,5 +221,5 @@ pub fn decode_peers(announce_response: &[u8]) -> Vec<PeerInfo> {
             }
         }
     }
-    peers
+    Ok(peers)
 }

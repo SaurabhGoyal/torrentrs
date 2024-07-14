@@ -2,6 +2,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,12 +13,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use sha1::Digest;
+use sha1::Sha1;
+
 use crate::bencode;
 use crate::peer;
 use crate::utils;
 
 const INFO_HASH_BYTE_LEN: usize = 20;
 const PEER_ID_BYTE_LEN: usize = 20;
+const PIECE_HASH_BYTE_LEN: usize = 20;
 
 const MAX_BLOCK_LENGTH: usize = 1 << 14;
 const MAX_CONCURRENT_BLOCKS: usize = 500;
@@ -82,6 +87,7 @@ struct Piece {
     index: usize,
     length: usize,
     have: usize,
+    hash: [u8; PIECE_HASH_BYTE_LEN],
 }
 
 #[derive(Debug)]
@@ -164,6 +170,7 @@ impl Controller {
                     index: piece_index,
                     length: piece_length,
                     have: 0,
+                    hash: meta.pieces[piece_index].hash,
                 });
                 begin = 0;
                 piece_index += 1;
@@ -334,7 +341,7 @@ impl Controller {
             .build()
             .unwrap();
         let res = client.execute(req).unwrap().bytes().unwrap();
-        let peers_info = bencode::decode_peers(res.as_ref());
+        let peers_info = bencode::decode_peers(res.as_ref()).unwrap();
         peers_info
             .into_iter()
             .map(|peer_info| {
@@ -401,51 +408,94 @@ impl Controller {
                 _ => {}
             },
             peer::Event::Block(piece_index, begin, data) => {
-                let block_id = get_block_id(piece_index, begin);
-                let block = self.torrent.blocks.get_mut(&block_id).unwrap();
-                let file_index = block.file_index;
-                if block.path.is_some() {
-                    return;
-                }
-                let block_path = temp_prefix_path.join(block_id.as_str());
-                let _wb = fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(block_path.as_path())
-                    .unwrap()
-                    .write(&data)
-                    .unwrap();
-                block.path = Some(block_path);
-
-                // Check if file is complete.
-                let file = self.torrent.files.get_mut(file_index).unwrap();
-                let file_path = self.torrent.dest_path.join(file.relative_path.as_path());
-                let mut file_completed_blocks = self
-                    .torrent
-                    .blocks
-                    .iter_mut()
-                    .filter(|(_block_id, block)| {
-                        block.file_index == file_index && block.path.is_some()
-                    })
-                    .collect::<Vec<(&String, &mut Block)>>();
-                file_completed_blocks.sort_by_key(|(_, block)| (block.piece_index, block.begin));
-                // If all blocks of the file are done, write them to file.
-                if file_completed_blocks.len() == file.block_ids.len() {
-                    let mut file_object = fs::OpenOptions::new()
+                // Check and write data.
+                {
+                    let block_id = get_block_id(piece_index, begin);
+                    let block = self.torrent.blocks.get_mut(&block_id).unwrap();
+                    if block.path.is_some() {
+                        return;
+                    }
+                    let block_path = temp_prefix_path.join(block_id.as_str());
+                    let _wb = fs::OpenOptions::new()
                         .create_new(true)
                         .write(true)
-                        .open(file_path.as_path())
+                        .open(block_path.as_path())
+                        .unwrap()
+                        .write(&data)
                         .unwrap();
-                    for (_block_id, block) in file_completed_blocks {
-                        let mut block_file = fs::OpenOptions::new()
-                            .read(true)
-                            .open(block.path.as_ref().unwrap().as_path())
-                            .unwrap();
-                        let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
-                        assert_eq!(bytes_copied, (block.length) as u64);
-                        fs::remove_file(block.path.as_ref().unwrap().as_path()).unwrap();
+                    block.path = Some(block_path);
+                }
+
+                // Verify integrity of pieces if all blocks for piece are complete.
+                {
+                    let mut piece_blocks = self
+                        .torrent
+                        .blocks
+                        .iter()
+                        .filter(|(_block_id, block)| block.piece_index == piece_index)
+                        .collect::<Vec<(&String, &Block)>>();
+                    piece_blocks.sort_by_key(|(_block_id, block)| block.begin);
+                    if piece_blocks
+                        .iter()
+                        .all(|(_block_id, block)| block.path.is_some())
+                    {
+                        let mut sha1_hasher = Sha1::new();
+                        let piece = self.torrent.pieces.get_mut(piece_index).unwrap();
+                        for (_block_id, block) in piece_blocks {
+                            let mut buf = vec![0_u8; block.length];
+                            let mut block_file = fs::OpenOptions::new()
+                                .read(true)
+                                .open(block.path.as_ref().unwrap().as_path())
+                                .unwrap();
+                            let _ = block_file.read(&mut buf[..]).unwrap();
+                            sha1_hasher.update(&buf);
+                        }
+                        assert_eq!(
+                            piece.hash,
+                            sha1_hasher.finalize().as_slice(),
+                            "torrent {}, piece {} hash match",
+                            self.torrent.directory.as_ref().unwrap().to_str().unwrap(),
+                            piece_index
+                        );
                     }
-                    file.path = Some(file_path);
+                }
+
+                // Check and write file if complete.
+                {
+                    let block_id = get_block_id(piece_index, begin);
+                    let block = self.torrent.blocks.get(&block_id).unwrap();
+                    let file_index = block.file_index;
+
+                    let file = self.torrent.files.get_mut(file_index).unwrap();
+                    let file_path = self.torrent.dest_path.join(file.relative_path.as_path());
+                    let mut file_completed_blocks = self
+                        .torrent
+                        .blocks
+                        .iter_mut()
+                        .filter(|(_block_id, block)| {
+                            block.file_index == file_index && block.path.is_some()
+                        })
+                        .collect::<Vec<(&String, &mut Block)>>();
+                    file_completed_blocks
+                        .sort_by_key(|(_, block)| (block.piece_index, block.begin));
+                    // If all blocks of the file are done, write them to file.
+                    if file_completed_blocks.len() == file.block_ids.len() {
+                        let mut file_object = fs::OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(file_path.as_path())
+                            .unwrap();
+                        for (_block_id, block) in file_completed_blocks {
+                            let mut block_file = fs::OpenOptions::new()
+                                .read(true)
+                                .open(block.path.as_ref().unwrap().as_path())
+                                .unwrap();
+                            let bytes_copied = io::copy(&mut block_file, &mut file_object).unwrap();
+                            assert_eq!(bytes_copied, (block.length) as u64);
+                            fs::remove_file(block.path.as_ref().unwrap().as_path()).unwrap();
+                        }
+                        file.path = Some(file_path);
+                    }
                 }
                 self.send_torrent_controller_event();
             }
