@@ -1,4 +1,5 @@
 use crate::utils;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str;
 use std::str::FromStr;
@@ -33,25 +34,25 @@ const PORT_KEY: &[u8] = "port".as_bytes();
 pub const INFO_HASH_BYTE_LEN: usize = 20;
 pub const PIECE_HASH_BYTE_LEN: usize = 20;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FileInfo {
     pub relative_path: PathBuf,
     pub length: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PieceInfo {
     pub hash: [u8; PIECE_HASH_BYTE_LEN],
     pub length: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PeerInfo {
     pub ip: String,
     pub port: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetaInfo {
     pub info_hash: [u8; INFO_HASH_BYTE_LEN],
     pub tracker: String,
@@ -76,7 +77,7 @@ pub fn decode_metainfo(metainfo: &[u8]) -> anyhow::Result<MetaInfo> {
                     tracker = Some(str::from_utf8(value)?);
                 }
                 (INFO_KEY, Object::Dict(mut value)) => {
-                    while let Ok(Some((key, mut value))) = value.next_pair() {
+                    while let Ok(Some((key, value))) = value.next_pair() {
                         match (key, value) {
                             (NAME_KEY, Object::Bytes(value)) => {
                                 primary_file_name =

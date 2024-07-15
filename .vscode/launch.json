@@ -20,7 +20,8 @@
                 }
             },
             "args": [
-                "sample_torrents/sample.torrent",
+                "local",
+                "sample_torrents/sample_7_multifile.torrent",
                 "local/test2",
             ],
             "cwd": "${workspaceFolder}"

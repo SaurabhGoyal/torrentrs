@@ -27,7 +27,7 @@ Single torrent level
 - [x] Connect with tracker URL to get list of peers.
 - [x] Connect with peers to request pieces.
 - [x] Download pieces, check integrity and write bytes to the disk.
-- [ ] On completion, verify integrity of whole data.
+- [x] On completion, verify integrity of whole data.
 - [ ] Seed.
 
 Client level

@@ -126,8 +126,8 @@ struct Torrent {
 
 impl Controller {
     pub fn new(
-        meta: &bencode::MetaInfo,
         client_id: [u8; PEER_ID_BYTE_LEN],
+        meta: &bencode::MetaInfo,
         dest_path: &str,
         event_tx: Sender<ControllerEvent>,
     ) -> (Self, Sender<ControlCommand>) {
@@ -217,7 +217,7 @@ impl Controller {
         (Self { torrent, event_tx }, controller_tx)
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> anyhow::Result<()> {
         if self.torrent.peers.is_none() {
             self.torrent.peers = Some(self.get_announce_response());
         }
@@ -230,6 +230,15 @@ impl Controller {
         ));
         // Create destination directory and a temporary directory inside it for holding the blocks.
         fs::create_dir_all(temp_prefix_path.as_path()).unwrap();
+
+        // Mark the blocks with the path if they are already present.
+        for entry in fs::read_dir(temp_prefix_path.as_path())? {
+            let entry = entry?.path();
+            let file_name = entry.file_name().unwrap().to_str().unwrap();
+            if let Some(block) = self.torrent.blocks.get_mut(file_name) {
+                block.path = Some(entry);
+            }
+        }
 
         loop {
             {
@@ -310,7 +319,7 @@ impl Controller {
                         // We don't care if peer thread faced any issue.
                         let _ = peer.handle.take().unwrap().join();
                     }
-                    return;
+                    return Ok(());
                 }
             }
             thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
@@ -417,7 +426,8 @@ impl Controller {
                     }
                     let block_path = temp_prefix_path.join(block_id.as_str());
                     let _wb = fs::OpenOptions::new()
-                        .create_new(true)
+                        .create(true)
+                        .truncate(true)
                         .write(true)
                         .open(block_path.as_path())
                         .unwrap()
@@ -431,9 +441,9 @@ impl Controller {
                     let mut piece_blocks = self
                         .torrent
                         .blocks
-                        .iter()
+                        .iter_mut()
                         .filter(|(_block_id, block)| block.piece_index == piece_index)
-                        .collect::<Vec<(&String, &Block)>>();
+                        .collect::<Vec<(&String, &mut Block)>>();
                     piece_blocks.sort_by_key(|(_block_id, block)| block.begin);
                     if piece_blocks
                         .iter()
@@ -441,7 +451,7 @@ impl Controller {
                     {
                         let mut sha1_hasher = Sha1::new();
                         let piece = self.torrent.pieces.get_mut(piece_index).unwrap();
-                        for (_block_id, block) in piece_blocks {
+                        for (_block_id, block) in piece_blocks.iter() {
                             let mut buf = vec![0_u8; block.length];
                             let mut block_file = fs::OpenOptions::new()
                                 .read(true)
@@ -450,13 +460,12 @@ impl Controller {
                             let _ = block_file.read(&mut buf[..]).unwrap();
                             sha1_hasher.update(&buf);
                         }
-                        assert_eq!(
-                            piece.hash,
-                            sha1_hasher.finalize().as_slice(),
-                            "torrent {}, piece {} hash match",
-                            self.torrent.directory.as_ref().unwrap().to_str().unwrap(),
-                            piece_index
-                        );
+                        if piece.hash != sha1_hasher.finalize().as_slice() {
+                            // Piece data is not valid, delete all its blocks and request again.
+                            piece_blocks.into_iter().for_each(|(_block_id, block)| {
+                                block.path = None;
+                            })
+                        }
                     }
                 }
 
@@ -481,7 +490,8 @@ impl Controller {
                     // If all blocks of the file are done, write them to file.
                     if file_completed_blocks.len() == file.block_ids.len() {
                         let mut file_object = fs::OpenOptions::new()
-                            .create_new(true)
+                            .create(true)
+                            .truncate(true)
                             .write(true)
                             .open(file_path.as_path())
                             .unwrap();
