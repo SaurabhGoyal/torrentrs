@@ -42,8 +42,7 @@ pub struct Controller {
 pub struct State {
     pub files_total: usize,
     pub files_completed: usize,
-    pub blocks_total: usize,
-    pub blocks_completed: usize,
+    pub blocks: Vec<bool>,
     pub peers_total: usize,
     pub peers_connected: usize,
     pub downloaded_window_second: (u64, usize),
@@ -636,13 +635,12 @@ impl Controller {
                         .iter()
                         .filter(|f| f.path.is_some())
                         .count(),
-                    blocks_total: self.torrent.blocks.len(),
-                    blocks_completed: self
+                    blocks: self
                         .torrent
                         .blocks
                         .iter()
-                        .filter(|(_, block)| block.path.is_some())
-                        .count(),
+                        .map(|(_, block)| block.path.is_some())
+                        .collect::<Vec<bool>>(),
                     peers_total: self.torrent.peers.as_ref().unwrap().len(),
                     peers_connected: self
                         .torrent

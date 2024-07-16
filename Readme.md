@@ -45,6 +45,10 @@ Server level
 - [ ] Acting as a peer that can serve data.
 - [ ] Better management for choke and interest actions for both parties.
 
+Others
+- [ ] Unit tests
+- [ ] Blog post
+
 # References
 - Blog posts -
   - https://allenkim67.github.io/programming/2016/05/04/how-to-make-your-own-bittorrent-client.html

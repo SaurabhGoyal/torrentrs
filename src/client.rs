@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write as _},
+    io::{self, Read, Write as _},
     sync::mpsc::{channel, Receiver, Sender},
     thread::{self, JoinHandle},
     time::Duration,
@@ -27,8 +27,7 @@ const DB_FILE: &str = "client.json";
 struct TorrentState {
     files_total: usize,
     files_completed: usize,
-    blocks_total: usize,
-    blocks_completed: usize,
+    blocks: Vec<bool>,
     peers_total: usize,
     peers_connected: usize,
     downloaded_window_second: (u64, usize),
@@ -211,8 +210,7 @@ impl Client {
                 torrent.state = Some(TorrentState {
                     files_total: state.files_total,
                     files_completed: state.files_completed,
-                    blocks_total: state.blocks_total,
-                    blocks_completed: state.blocks_completed,
+                    blocks: state.blocks,
                     peers_total: state.peers_total,
                     peers_connected: state.peers_connected,
                     downloaded_window_second: (0, 0),
@@ -226,6 +224,7 @@ impl Client {
             _ => {}
         }
         self.save_state()?;
+        clear_screen();
         println!("{}", self.render_view()?);
         Ok(())
     }
@@ -244,52 +243,45 @@ impl Client {
     }
 
     fn render_view(&self) -> anyhow::Result<String> {
-        Ok(format!(
-            "{}{}{}",
-            format!("{}[2J", 27 as char), // ANSI escape code to clear screen
-            format!("{}[1;1H", 27 as char), // ANSI escape code to move cursor to start of screen
-            self.state.torrents.values().try_fold(
-                String::new(),
-                |mut out, ts| -> anyhow::Result<String> {
-                    match ts.state.as_ref() {
-                        Some(tsu) => {
-                            let mut download_rate = String::from(" - ");
-                            if tsu.downloaded_window_second.0
-                                == SystemTime::now()
-                                    .duration_since(SystemTime::UNIX_EPOCH)?
-                                    .as_secs()
-                            {
-                                download_rate =
-                                    format!("{} Kbps", tsu.downloaded_window_second.1 / 1024);
-                            }
-                            let block_bar = "⁝|⁝|⁝|⁝|⁝|⁝|⁝|⁝|⁝|⁝|⁝|";
-                            let _ = writeln!(
-                            out,
-                            "\n[{}] [{}]\n - Blocks - {}/{} ({}), Files - {}/{}, Peers - {}/{}\n{}\n",
-                            if tsu.files_completed == tsu.files_total {
-                                "Completed"
-                            } else {
-                                "Downloading"
-                            },
-                            ts.name,
-                            tsu.blocks_completed,
-                            tsu.blocks_total,
-                            download_rate,
-                            tsu.files_completed,
-                            tsu.files_total,
-                            tsu.peers_connected,
-                            tsu.peers_total,
-                            block_bar,
-                        );
-                        }
-                        None => {
-                            let _ = writeln!(out, "\n[Fetching] [{}]\n -------------", ts.name,);
-                        }
-                    }
-                    Ok(out)
+        let mut torrent_views = vec![];
+        for torrent in self.state.torrents.values() {
+            let mut status = "Fetching";
+            let mut stats = String::from("---");
+            if let Some(state) = torrent.state.as_ref() {
+                status = "Downloading";
+                if state.files_completed == state.files_total {
+                    status = "Completed";
                 }
-            )?
-        ))
+                let mut download_rate = String::from(" - ");
+                if state.downloaded_window_second.0
+                    == SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)?
+                        .as_secs()
+                {
+                    download_rate = format!("{} Kbps", state.downloaded_window_second.1 / 1024);
+                }
+                // let block_bar = state
+                //     .blocks
+                //     .iter()
+                //     .map(|b| if *b { "\u{007c}" } else { "\u{2506}" })
+                //     .collect::<Vec<&str>>()
+                //     .join("");
+
+                stats = format!(
+                    "[Blocks - {}/{} ({}), Files - {}/{}, Peers - {}/{}]\n",
+                    state.blocks.iter().filter(|b| **b).count(),
+                    state.blocks.len(),
+                    download_rate,
+                    state.files_completed,
+                    state.files_total,
+                    state.peers_connected,
+                    state.peers_total,
+                    // block_bar,
+                );
+            }
+            torrent_views.push(format!("[{}] [{}]\n{}\n", status, torrent.name, stats));
+        }
+        Ok(torrent_views.join("\n"))
     }
 }
 
@@ -326,4 +318,10 @@ fn init_state(data_dir: &str) -> anyhow::Result<ClientState> {
         }
     };
     Ok(state)
+}
+
+fn clear_screen() {
+    print!("{}[2J", 27 as char); // ANSI escape code to clear the screen
+    print!("{}[1;1H", 27 as char); // ANSI escape code to move the cursor to the top-left corner
+    io::stdout().flush().unwrap(); // Flush stdout to ensure screen is cleared immediately
 }
