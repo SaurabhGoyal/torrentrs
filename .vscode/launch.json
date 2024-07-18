@@ -21,6 +21,10 @@
             },
             "args": [
                 "local",
+                "sample_torrents/sample_5.torrent",
+                "local/test2",
+                "sample_torrents/sample.torrent",
+                "local/test2",
                 "sample_torrents/sample_7_multifile.torrent",
                 "local/test2",
             ],

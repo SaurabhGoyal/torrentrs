@@ -27,7 +27,7 @@ const DB_FILE: &str = "client.json";
 struct TorrentState {
     files_total: usize,
     files_completed: usize,
-    blocks: Vec<bool>,
+    blocks: Vec<(String, bool)>,
     peers_total: usize,
     peers_connected: usize,
     downloaded_window_second: (u64, usize),
@@ -269,7 +269,11 @@ impl Client {
 
                 stats = format!(
                     "[Blocks - {}/{} ({}), Files - {}/{}, Peers - {}/{}]\n",
-                    state.blocks.iter().filter(|b| **b).count(),
+                    state
+                        .blocks
+                        .iter()
+                        .filter(|(_, downloaded)| *downloaded)
+                        .count(),
                     state.blocks.len(),
                     download_rate,
                     state.files_completed,
