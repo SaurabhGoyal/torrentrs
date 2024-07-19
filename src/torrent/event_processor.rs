@@ -1,13 +1,24 @@
+use std::{
+    fs,
+    io::{Read as _, Seek as _, SeekFrom},
+};
+
+use sha1::{Digest, Sha1};
+
 use crate::peer;
 
-use super::{format, state::Torrent, writer};
+use super::{
+    formatter,
+    models::{Block, BlockStatus, Torrent},
+    writer,
+};
 
 pub(super) fn process_event(
     torrent: &mut Torrent,
     event: peer::ControllerEvent,
 ) -> anyhow::Result<()> {
     let piece_count = torrent.pieces.len();
-    let peer_id = format::get_peer_id(event.ip.as_str(), event.port);
+    let peer_id = formatter::get_peer_id(event.ip.as_str(), event.port);
     let peer = torrent
         .peers
         .as_mut()
@@ -53,13 +64,68 @@ pub(super) fn process_event(
         },
         peer::Event::Block(piece_index, begin, data) => {
             writer::write_block(torrent, piece_index, begin, data)?;
-            writer::validate_piece(torrent, piece_index)?;
-            let file_index = torrent
+            let mut piece_blocks = torrent
                 .blocks
-                .get(&format::get_block_id(piece_index, begin))
-                .unwrap()
-                .file_index;
-            writer::write_file(torrent, file_index)?;
+                .iter()
+                .filter(|(_block_id, block)| block.piece_index == piece_index)
+                .collect::<Vec<(&String, &Block)>>();
+            piece_blocks.sort_by_key(|(_block_id, block)| block.begin);
+            if piece_blocks.iter().all(|(_block_id, block)| {
+                matches!(
+                    block.data_status,
+                    BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
+                )
+            }) {
+                let mut sha1_hasher = Sha1::new();
+                let piece = torrent.pieces.get(piece_index).unwrap();
+                for (block_id, block) in piece_blocks.iter() {
+                    let mut buf = vec![0_u8; block.length];
+                    match &block.data_status {
+                        BlockStatus::PersistedSeparately(path) => {
+                            let mut block_file = fs::OpenOptions::new()
+                                .read(true)
+                                .open(path.as_path())
+                                .unwrap();
+                            let _ = block_file.read(&mut buf[..]).unwrap();
+                        }
+                        BlockStatus::PersistedInFile => {
+                            let file = torrent.files.get(block.file_index).unwrap();
+                            let mut block_file = fs::OpenOptions::new()
+                                .read(true)
+                                .open(file.path.as_ref().unwrap())
+                                .unwrap();
+                            let (offset, _) = file.block_ids_pos.get(block_id.as_str()).unwrap();
+                            let _ = block_file.seek(SeekFrom::Start(*offset as u64));
+                            block_file.read_exact(&mut buf[..])?;
+                        }
+                        _ => {
+                            // this case is not possible
+                        }
+                    }
+                    sha1_hasher.update(&buf);
+                }
+                let verified = piece.hash == sha1_hasher.finalize().as_slice();
+                for (_block_id, block) in torrent
+                    .blocks
+                    .iter_mut()
+                    .filter(|(_block_id, block)| block.piece_index == piece_index)
+                {
+                    // If piece verified, mark all blocks verified, else mark blocks for fresh download.
+                    if verified {
+                        block.verified = true;
+                    } else {
+                        block.data_status = BlockStatus::Pending;
+                    }
+                }
+                if verified {
+                    let file_index = torrent
+                        .blocks
+                        .get(&formatter::get_block_id(piece_index, begin))
+                        .unwrap()
+                        .file_index;
+                    writer::write_file(torrent, file_index)?;
+                }
+            }
         }
         peer::Event::Metric(event) => match event {
             peer::Metric::DownloadWindowSecond(second_window, downloaded_bytes) => {

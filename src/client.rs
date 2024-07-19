@@ -48,6 +48,7 @@ struct Torrent {
     control_tx: Option<Sender<torrent::ControlCommand>>,
     #[serde(skip)]
     handle: Option<JoinHandle<()>>,
+    #[serde(skip)]
     state: Option<TorrentState>,
 }
 
@@ -146,6 +147,8 @@ impl Client {
                 {
                     let _ = torrent_obj.handle.take().unwrap().join();
                 }
+                clear_screen();
+                println!("{}", self.render_view()?);
             }
             thread::sleep(Duration::from_millis(1000));
         }
@@ -224,8 +227,6 @@ impl Client {
             _ => {}
         }
         self.save_state()?;
-        clear_screen();
-        println!("{}", self.render_view()?);
         Ok(())
     }
 

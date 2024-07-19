@@ -5,9 +5,11 @@ use std::{
 
 use sha1::{Digest, Sha1};
 
+use crate::utils;
+
 use super::{
-    format,
-    state::{Block, BlockStatus, Torrent},
+    formatter,
+    models::{Block, BlockStatus, Torrent},
 };
 
 pub(super) fn write_block(
@@ -16,7 +18,7 @@ pub(super) fn write_block(
     begin: usize,
     data: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let block_id = format::get_block_id(piece_index, begin);
+    let block_id = formatter::get_block_id(piece_index, begin);
     let block_path = torrent.get_temp_dir_path().join(block_id.as_str());
     let block = torrent.blocks.get_mut(&block_id).unwrap();
     match block.data_status {
@@ -35,52 +37,6 @@ pub(super) fn write_block(
         .unwrap();
     block.data_status = BlockStatus::PersistedSeparately(block_path);
     Ok(())
-}
-
-pub(super) fn validate_piece(torrent: &mut Torrent, piece_index: usize) -> anyhow::Result<bool> {
-    let mut piece_blocks = torrent
-        .blocks
-        .iter_mut()
-        .filter(|(_block_id, block)| block.piece_index == piece_index)
-        .collect::<Vec<(&String, &mut Block)>>();
-    piece_blocks.sort_by_key(|(_block_id, block)| block.begin);
-    if piece_blocks.iter().all(|(_block_id, block)| {
-        matches!(
-            block.data_status,
-            BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
-        )
-    }) {
-        let mut sha1_hasher = Sha1::new();
-        let piece = torrent.pieces.get_mut(piece_index).unwrap();
-        for (block_id, block) in piece_blocks.iter() {
-            let mut buf = vec![0_u8; block.length];
-            match &block.data_status {
-                BlockStatus::PersistedSeparately(path) => {
-                    let mut block_file = fs::OpenOptions::new()
-                        .read(true)
-                        .open(path.as_path())
-                        .unwrap();
-                    let _ = block_file.read(&mut buf[..]).unwrap();
-                }
-                BlockStatus::PersistedInFile => {
-                    let file = torrent.files.get(block.file_index).unwrap();
-                    let mut block_file = fs::OpenOptions::new()
-                        .read(true)
-                        .open(file.path.as_ref().unwrap())
-                        .unwrap();
-                    let (offset, _) = file.block_ids_pos.get(block_id.as_str()).unwrap();
-                    let _ = block_file.seek(SeekFrom::Start(*offset as u64));
-                    block_file.read_exact(&mut buf[..])?;
-                }
-                _ => {
-                    // this case is not possible
-                }
-            }
-            sha1_hasher.update(&buf);
-        }
-        return Ok(piece.hash == sha1_hasher.finalize().as_slice());
-    }
-    Ok(false)
 }
 
 pub(super) fn write_file(torrent: &mut Torrent, file_index: usize) -> anyhow::Result<()> {
@@ -137,4 +93,55 @@ pub(super) fn write_file(torrent: &mut Torrent, file_index: usize) -> anyhow::Re
         file.path = Some(file_path);
     }
     Ok(())
+}
+
+pub(super) fn is_piece_valid(
+    torrent: &Torrent,
+    piece_index: usize,
+) -> anyhow::Result<Option<bool>> {
+    let mut piece_blocks = torrent
+        .blocks
+        .iter()
+        .filter(|(_block_id, block)| block.piece_index == piece_index)
+        .collect::<Vec<(&String, &Block)>>();
+    piece_blocks.sort_by_key(|(_block_id, block)| block.begin);
+    if piece_blocks.iter().all(|(_block_id, block)| {
+        matches!(
+            block.data_status,
+            BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
+        )
+    }) {
+        let mut sha1_hasher = Sha1::new();
+        let piece = torrent.pieces.get(piece_index).unwrap();
+        for (block_id, block) in piece_blocks.iter() {
+            let mut buf = vec![0_u8; block.length];
+            match &block.data_status {
+                BlockStatus::PersistedSeparately(path) => {
+                    let mut block_file = fs::OpenOptions::new()
+                        .read(true)
+                        .open(path.as_path())
+                        .unwrap();
+                    let _ = block_file.read(&mut buf[..]).unwrap();
+                }
+                BlockStatus::PersistedInFile => {
+                    let file = torrent.files.get(block.file_index).unwrap();
+                    let mut block_file = fs::OpenOptions::new()
+                        .read(true)
+                        .open(file.path.as_ref().unwrap())
+                        .unwrap();
+                    let (offset, _) = file.block_ids_pos.get(block_id.as_str()).unwrap();
+                    let _ = block_file.seek(SeekFrom::Start(*offset as u64));
+                    block_file.read_exact(&mut buf[..])?;
+                }
+                _ => {
+                    // this case is not possible
+                }
+            }
+            sha1_hasher.update(&buf);
+        }
+        let piece_hash_hex = utils::bytes_to_hex_encoding(&piece.hash);
+        let sha1_hex = utils::bytes_to_hex_encoding(sha1_hasher.finalize().as_slice());
+        return Ok(Some(piece_hash_hex == sha1_hex));
+    }
+    Ok(None)
 }

@@ -1,9 +1,11 @@
 mod event_processor;
-mod format;
+mod formatter;
+mod models;
 mod scheduler;
 mod state;
 mod writer;
 
+use std::collections::HashSet;
 use std::fs;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
@@ -12,8 +14,9 @@ use std::thread;
 use std::time::Duration;
 
 use event_processor::process_event;
+use models::{BlockStatus, Torrent, PEER_ID_BYTE_LEN};
+use scheduler::reset_finished_peers;
 use scheduler::schedule;
-use state::{BlockStatus, Torrent, PEER_ID_BYTE_LEN};
 
 use crate::bencode;
 use crate::peer;
@@ -38,11 +41,7 @@ pub struct State {
 }
 
 #[derive(Debug)]
-pub enum ControlCommand {
-    Start,
-    Pause,
-    Stop,
-}
+pub enum ControlCommand {}
 
 #[derive(Debug)]
 pub enum Metric {
@@ -68,7 +67,7 @@ impl Controller {
         dest_path: &str,
         event_tx: Sender<ControllerEvent>,
     ) -> (Self, Sender<ControlCommand>) {
-        let torrent = state::Torrent::new(client_id, dest_path, meta);
+        let torrent = models::Torrent::new(client_id, dest_path, meta);
         let (controller_tx, controller_rx) = channel::<ControlCommand>();
         (Self { torrent, event_tx }, controller_tx)
     }
@@ -77,69 +76,79 @@ impl Controller {
         fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
         fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         self.torrent.sync_with_disk()?;
-        self.torrent.sync_with_tracker()?;
+        self.torrent.sync_with_tracker();
 
         let mut end_game_mode = false;
         let mut concurrent_peers = 3;
         let (event_tx, event_rx) = channel::<peer::ControllerEvent>();
 
         loop {
-            {
-                // Process events
-                self.process_bounded_events(&event_rx, MAX_EVENTS_PER_CYCLE)?;
+            // Process events
+            self.process_bounded_events(&event_rx, MAX_EVENTS_PER_CYCLE)?;
 
-                // Update peers
-                for (_peer_id, peer) in self
-                    .torrent
-                    .peers
-                    .as_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .filter(|(_peer_id, peer)| peer.handle.is_some())
-                {
-                    if peer.handle.as_ref().unwrap().is_finished() {
-                        peer.handle = None;
-                    }
+            // Check updated status
+            let pending_blocks_count = self
+                .torrent
+                .blocks
+                .iter()
+                .filter(|(_block_id, block)| {
+                    matches!(
+                        block.data_status,
+                        BlockStatus::Pending | BlockStatus::Requested(_)
+                    )
+                })
+                .count();
+            // Enqueue download requests for pending blocks.
+            if pending_blocks_count > 0 {
+                if pending_blocks_count < 3 {
+                    end_game_mode = true;
+                    concurrent_peers = 10;
                 }
-
-                // Check updated status
-                let pending_blocks_count = self
+                reset_finished_peers(&mut self.torrent);
+                schedule(
+                    &mut self.torrent,
+                    event_tx.clone(),
+                    end_game_mode,
+                    concurrent_peers,
+                );
+            } else {
+                let unverified_pieces = self
                     .torrent
                     .blocks
                     .iter()
-                    .filter(|(_block_id, block)| {
-                        matches!(
-                            block.data_status,
-                            BlockStatus::Pending | BlockStatus::Requested(_)
-                        )
-                    })
-                    .count();
-                // Enqueue download requests for pending blocks.
-                if pending_blocks_count > 0 {
-                    if pending_blocks_count < 3 {
-                        end_game_mode = true;
-                        concurrent_peers = 10;
+                    .filter(|(_block_id, block)| !block.verified)
+                    .map(|(_block_id, block)| block.piece_index)
+                    .collect::<HashSet<usize>>();
+                for piece_index in unverified_pieces {
+                    if let Some(verified) = writer::is_piece_valid(&self.torrent, piece_index)? {
+                        for (_block_id, block) in self
+                            .torrent
+                            .blocks
+                            .iter_mut()
+                            .filter(|(_block_id, block)| block.piece_index == piece_index)
+                        {
+                            // If piece verified, mark all blocks verified, else mark blocks for fresh download.
+                            if verified {
+                                block.verified = true;
+                            } else {
+                                block.data_status = BlockStatus::Pending;
+                            }
+                        }
                     }
-                    schedule(
-                        &mut self.torrent,
-                        event_tx.clone(),
-                        end_game_mode,
-                        concurrent_peers,
-                    );
-                } else {
-                    let pending_file_indices = self
-                        .torrent
-                        .files
-                        .iter()
-                        .filter(|file| file.path.is_some())
-                        .map(|file| file.index)
-                        .collect::<Vec<usize>>();
-                    for file_index in pending_file_indices {
-                        writer::write_file(&mut self.torrent, file_index)?;
-                    }
-                    break;
                 }
+                let pending_file_indices = self
+                    .torrent
+                    .files
+                    .iter()
+                    .filter(|file| file.path.is_none())
+                    .map(|file| file.index)
+                    .collect::<Vec<usize>>();
+                for file_index in pending_file_indices {
+                    writer::write_file(&mut self.torrent, file_index)?;
+                }
+                break;
             }
+            self.send_torrent_controller_event();
             thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
         }
         self.cleanup()
@@ -156,7 +165,6 @@ impl Controller {
                 Ok(event) => {
                     process_event(&mut self.torrent, event)?;
                     processed_events += 1;
-                    self.send_torrent_controller_event();
                     if processed_events > count {
                         break;
                     }
@@ -227,6 +235,10 @@ impl Controller {
     }
 
     fn cleanup(&mut self) -> anyhow::Result<()> {
+        // Send a final controller event to notify client of the state.
+        self.send_torrent_controller_event();
+        // Remove temp dir.
+        fs::remove_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         // Wait for all files to be written.
         assert!(self.torrent.files.iter().all(|file| file.path.is_some()));
         // Close all peer connections

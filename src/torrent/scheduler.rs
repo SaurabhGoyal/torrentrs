@@ -6,7 +6,7 @@ use std::{
 
 use crate::peer;
 
-use super::state::{Block, BlockStatus, Peer, Torrent};
+use super::models::{Block, BlockStatus, Peer, Torrent};
 
 const MAX_CONCURRENT_BLOCKS: usize = 500;
 const MIN_PEERS_FOR_DOWNLOAD: usize = 1;
@@ -106,6 +106,24 @@ pub(super) fn schedule(
                     }
                 }
             }
+        }
+    }
+}
+
+pub(super) fn reset_finished_peers(torrent: &mut Torrent) {
+    // Update peers
+    for (_peer_id, peer) in torrent
+        .peers
+        .as_mut()
+        .unwrap()
+        .iter_mut()
+        .filter(|(_peer_id, peer)| peer.handle.is_some())
+    {
+        if peer.handle.as_ref().unwrap().is_finished() {
+            peer.control_rx = None;
+            peer.state = None;
+            peer.state = None;
+            peer.last_initiated_at = None;
         }
     }
 }

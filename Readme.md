@@ -48,6 +48,7 @@ Server level
 Others
 - [ ] Unit tests
 - [ ] Blog post
+- [ ] Reduce memory footprint
 
 # References
 - Blog posts -
