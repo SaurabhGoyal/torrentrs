@@ -24,12 +24,17 @@ const MAX_EVENTS_PER_CYCLE: usize = 500;
 const DB_FILE: &str = "client.json";
 
 #[derive(Debug, Deserialize, Serialize)]
+enum TorrentStatus {
+    Fetching,
+    Downloading,
+    Completed
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct TorrentState {
-    files_total: usize,
-    files_completed: usize,
-    blocks: Vec<(String, bool)>,
-    peers_total: usize,
-    peers_connected: usize,
+    files: Vec<(String, bool, bool)>,
+    blocks: Vec<(String, bool, bool)>,
+    peers: Vec<(String, bool)>,
     downloaded_window_second: (u64, usize),
 }
 
@@ -140,7 +145,11 @@ impl Client {
                     .filter(|(_, torrent_obj)| {
                         let mut files_complete = false;
                         if let Some(state) = torrent_obj.state.as_ref() {
-                            files_complete = state.files_completed == state.files_total;
+                            files_complete = state.files.len() == state
+                            .files
+                            .iter()
+                            .filter(|(_, downloaded, _)| *downloaded)
+                            .count();
                         }
                         files_complete
                     })
@@ -211,11 +220,9 @@ impl Client {
         match (event.event, torrent.state.as_mut()) {
             (torrent::Event::State(state), _) => {
                 torrent.state = Some(TorrentState {
-                    files_total: state.files_total,
-                    files_completed: state.files_completed,
+                    files: state.files,
+                    peers: state.peers,
                     blocks: state.blocks,
-                    peers_total: state.peers_total,
-                    peers_connected: state.peers_connected,
                     downloaded_window_second: (0, 0),
                 });
             }
@@ -250,17 +257,21 @@ impl Client {
             let mut stats = String::from("---");
             if let Some(state) = torrent.state.as_ref() {
                 status = "Downloading";
-                if state.files_completed == state.files_total {
+                if state.files.len() == state
+                .files
+                .iter()
+                .filter(|(_, downloaded, _)| *downloaded)
+                .count() {
                     status = "Completed";
                 }
-                let mut download_rate = String::from(" - ");
-                if state.downloaded_window_second.0
-                    == SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs()
-                {
-                    download_rate = format!("{} Kbps", state.downloaded_window_second.1 / 1024);
-                }
+                // let mut download_rate = String::from(" - ");
+                // if state.downloaded_window_second.0
+                //     == SystemTime::now()
+                //         .duration_since(SystemTime::UNIX_EPOCH)?
+                //         .as_secs()
+                // {
+                //     download_rate = format!("{} Kbps", state.downloaded_window_second.1 / 1024);
+                // }
                 // let block_bar = state
                 //     .blocks
                 //     .iter()
@@ -269,19 +280,36 @@ impl Client {
                 //     .join("");
 
                 stats = format!(
-                    "[Blocks - {}/{} ({}), Files - {}/{}, Peers - {}/{}]\n",
+                    " - Blocks - total {}, downloaded - {}, verified {}\n - Files - total {}, downloaded - {}, verified {}\n - Peers - total - {}, connected - {}\n",
+                    state.blocks.len(),
                     state
                         .blocks
                         .iter()
-                        .filter(|(_, downloaded)| *downloaded)
+                        .filter(|(_, downloaded, _)| *downloaded)
                         .count(),
-                    state.blocks.len(),
-                    download_rate,
-                    state.files_completed,
-                    state.files_total,
-                    state.peers_connected,
-                    state.peers_total,
-                    // block_bar,
+                    state
+                        .blocks
+                        .iter()
+                        .filter(|(_, _, verified)| *verified)
+                        .count(),
+                    state.files.len(),
+                    state
+                        .files
+                        .iter()
+                        .filter(|(_, downloaded, _)| *downloaded)
+                        .count(),
+                    state
+                        .files
+                        .iter()
+                        .filter(|(_, _, verified)| *verified)
+                        .count(),
+                    state.peers.len(),
+                    state
+                        .peers
+                        .iter()
+                        .filter(|(_, connected)| *connected)
+                        .count(),
+                                                
                 );
             }
             torrent_views.push(format!("[{}] [{}]\n{}\n", status, torrent.name, stats));

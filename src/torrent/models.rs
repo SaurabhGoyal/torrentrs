@@ -18,6 +18,7 @@ pub(super) struct File {
     pub(super) block_ids: Vec<String>,
     pub(super) block_ids_pos: HashMap<String, (usize, usize)>,
     pub(super) path: Option<PathBuf>,
+    pub(super) verified: bool,
 }
 
 #[derive(Debug)]

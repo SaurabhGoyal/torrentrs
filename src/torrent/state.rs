@@ -64,13 +64,13 @@ impl Torrent {
                     verified: false,
                 },
             );
+            block_ids_pos.insert(block_id.clone(), (file_offset, block_length));
+            block_ids.push(block_id.clone());
             begin += block_length;
             piece_length += block_length;
             file_offset += block_length;
             piece_budget -= block_length;
             file_budget -= block_length;
-            block_ids.push(block_id.clone());
-            block_ids_pos.insert(block_id.clone(), (file_offset, block_length));
             // If we have hit piece boundary or this is the last piece for last file, add piece and move piece cursor.
             if piece_budget == 0 || (file_budget == 0 && file_index == meta.files.len() - 1) {
                 pieces.push(Piece {
@@ -95,6 +95,7 @@ impl Torrent {
                     block_ids: block_ids.clone(),
                     path: None,
                     block_ids_pos: block_ids_pos.clone(),
+                    verified: false,
                 });
                 block_ids.clear();
                 block_ids_pos.clear();
@@ -130,14 +131,6 @@ impl Torrent {
     }
 
     pub(super) fn sync_with_disk(&mut self) -> anyhow::Result<()> {
-        // Mark the blocks which are already present.
-        self.sync_blocks()?;
-        // Mark the files which are already present.
-        self.sync_files()?;
-        Ok(())
-    }
-
-    fn sync_blocks(&mut self) -> anyhow::Result<()> {
         let temp_dir_path = self.get_temp_dir_path();
         for entry in fs::read_dir(temp_dir_path.as_path())?.filter_map(|e| e.ok()) {
             let entry = entry.path();
@@ -147,12 +140,9 @@ impl Torrent {
                 block.verified = false;
             }
         }
-        Ok(())
-    }
 
-    fn sync_files(&mut self) -> anyhow::Result<()> {
-        let mut verified_blocks = HashSet::new();
-        let mut verified_file_paths = vec![];
+        let mut block_ids_persisted_in_file = vec![];
+        let mut files_persisted = vec![];
         for (file_index, dir_entry) in WalkDir::new(self.dest_path.as_path())
             .into_iter()
             .filter_map(|e| e.ok())
@@ -170,62 +160,65 @@ impl Torrent {
         {
             let meta = dir_entry.metadata().unwrap();
             let file_len = meta.len();
-            let mut file_offset = 0;
-            let mut file_obj = fs::OpenOptions::new()
-                .read(true)
-                .open(dir_entry.path())
-                .unwrap();
-            let mut piece_option: Option<&Piece> = None;
-            let mut piece_offset = 0;
-            let mut piece_block_ids = vec![];
-            let mut sha1_hasher_option: Option<Sha1> = None;
             let file = self.files.get(file_index).unwrap();
-            for block_id in file.block_ids.iter() {
-                if file_offset > file_len {
-                    break;
+            if file_len == file.length as u64 {
+                for block_id in file.block_ids.iter() {
+                    block_ids_persisted_in_file.push(block_id.to_string());
                 }
-                let block = self.blocks.get_mut(block_id).unwrap();
-                let mut buf = vec![0_u8; block.length];
-                let _ = file_obj.seek(SeekFrom::Start(file_offset));
-                if file_obj.read_exact(&mut buf[..]).is_err() {
-                    break;
-                }
-                if piece_option.is_none()
-                    || piece_option.as_ref().unwrap().index != block.piece_index
-                {
-                    piece_option = Some(self.pieces.get(block.piece_index).unwrap());
-                    piece_offset = 0;
-                    sha1_hasher_option = Some(Sha1::new());
-                }
-                piece_block_ids.push(block_id);
-                piece_offset += block.length;
-                sha1_hasher_option.as_mut().unwrap().update(&buf);
-                let piece = piece_option.as_ref().unwrap();
-                if piece.length == piece_offset {
-                    let piece = piece_option.take().unwrap();
-                    let sha1_hasher = sha1_hasher_option.take().unwrap();
-                    if piece.hash == sha1_hasher.finalize().as_slice() {
-                        while let Some(block_id) = piece_block_ids.pop() {
-                            verified_blocks.insert(block_id.to_string());
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                file_offset += block.length as u64;
-            }
-            if file_offset == file.length as u64 {
-                verified_file_paths.push((file_index, dir_entry.into_path()));
+                files_persisted.push((file_index, dir_entry.into_path()));
             }
         }
-        for block_id in verified_blocks {
+        for block_id in block_ids_persisted_in_file {
             let block = self.blocks.get_mut(&block_id).unwrap();
             block.data_status = BlockStatus::PersistedInFile;
-            block.verified = true;
         }
-        for (file_index, path) in verified_file_paths {
+        for (file_index, path) in files_persisted {
             let file = self.files.get_mut(file_index).unwrap();
             file.path = Some(path);
+        }
+        Ok(())
+    }
+
+    pub(super) fn verify_blocks_and_files(&mut self, max_count: usize) -> anyhow::Result<()> {
+        let mut piece_results = vec![];
+        for piece_index in self
+            .blocks
+            .iter()
+            .filter(|(_block_id, block)| !block.verified)
+            .map(|(_block_id, block)| block.piece_index)
+            .take(max_count)
+        {
+            if let Ok(Some(verified)) = writer::is_piece_valid(self, piece_index) {
+                piece_results.push((piece_index, verified));
+            }
+        }
+        for (piece_index, verified) in piece_results {
+            for (_block_id, block) in self
+                .blocks
+                .iter_mut()
+                .filter(|(_block_id, block)| block.piece_index == piece_index)
+            {
+                // If piece verified, mark all blocks verified, else mark blocks for fresh download.
+                if verified {
+                    block.verified = true;
+                } else {
+                    block.data_status = BlockStatus::Pending;
+                }
+            }
+        }
+        for file in self
+            .files
+            .iter_mut()
+            .filter(|f| f.path.is_some() && !f.verified)
+        {
+            if self
+                .blocks
+                .iter_mut()
+                .filter(|(_block_id, block)| block.file_index == file.index)
+                .all(|(_block_id, block)| block.verified)
+            {
+                file.verified = true;
+            }
         }
         Ok(())
     }

@@ -111,11 +111,7 @@ pub(super) fn process_event(
                     .filter(|(_block_id, block)| block.piece_index == piece_index)
                 {
                     // If piece verified, mark all blocks verified, else mark blocks for fresh download.
-                    if verified {
-                        block.verified = true;
-                    } else {
-                        block.data_status = BlockStatus::Pending;
-                    }
+                    block.verified = verified;
                 }
                 if verified {
                     let file_index = torrent

@@ -56,6 +56,10 @@ pub(super) fn write_file(torrent: &mut Torrent, file_index: usize) -> anyhow::Re
     file_completed_and_verified_blocks.sort_by_key(|(_, block)| (block.piece_index, block.begin));
     // If all blocks of the file are done, write them to file.
     if file_completed_and_verified_blocks.len() == file.block_ids.len() {
+        file.verified = true;
+        if file.path.is_some() {
+            return Ok(());
+        }
         let file_path = torrent.dest_path.join(file.relative_path.as_path());
         let mut file_object = fs::OpenOptions::new()
             .create(true)
