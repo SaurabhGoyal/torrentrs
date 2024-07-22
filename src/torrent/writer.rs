@@ -39,7 +39,47 @@ pub(super) fn write_block(
     Ok(())
 }
 
-pub(super) fn write_file(torrent: &mut Torrent, file_index: usize) -> anyhow::Result<()> {
+pub(super) fn verify_and_write_pendinfg_files(
+    torrent: &mut Torrent,
+    max_count: usize,
+) -> anyhow::Result<usize> {
+    let pending_file_indices = torrent
+        .files
+        .iter()
+        .filter(|file| {
+            (file.path.is_none() || !file.verified)
+                && torrent
+                    .blocks
+                    .iter()
+                    .filter(|(_block_id, block)| {
+                        block.file_index == file.index
+                            && matches!(
+                                block.data_status,
+                                BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
+                            )
+                            && block.verified
+                    })
+                    .count()
+                    == file.block_ids.len()
+        })
+        .map(|file| file.index)
+        .take(max_count)
+        .collect::<Vec<usize>>();
+
+    for file_index in pending_file_indices {
+        verify_and_write_file(torrent, file_index)?;
+    }
+    Ok(torrent
+        .files
+        .iter()
+        .filter(|file| file.path.is_none() || !file.verified)
+        .count())
+}
+
+pub(super) fn verify_and_write_file(
+    torrent: &mut Torrent,
+    file_index: usize,
+) -> anyhow::Result<()> {
     let file = torrent.files.get_mut(file_index).unwrap();
     let mut file_completed_and_verified_blocks = torrent
         .blocks

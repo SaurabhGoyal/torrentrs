@@ -119,7 +119,7 @@ pub(super) fn process_event(
                         .get(&formatter::get_block_id(piece_index, begin))
                         .unwrap()
                         .file_index;
-                    writer::write_file(torrent, file_index)?;
+                    writer::verify_and_write_file(torrent, file_index)?;
                 }
             }
         }

@@ -14,19 +14,20 @@ use std::time::Duration;
 
 use event_processor::process_event;
 use models::{BlockStatus, Torrent, PEER_ID_BYTE_LEN};
-use scheduler::reset_finished_peers;
-use scheduler::schedule;
 
 use crate::bencode;
 use crate::peer;
 
 const MAX_EVENTS_PER_CYCLE: usize = 10000;
 const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
+const BLOCK_SCHEDULING_BATCH_SIZE: usize = 500;
 const PIECE_VERIFICATION_BATCH_SIZE: usize = 50;
+const FILE_VERIFICATION_AND_WRITE_BATCH_SIZE: usize = 3;
 
 #[derive(Debug)]
 pub struct Controller {
     torrent: Torrent,
+    scheduler: scheduler::Scheduler,
     event_tx: Sender<ControllerEvent>,
 }
 
@@ -67,67 +68,43 @@ impl Controller {
     ) -> (Self, Sender<ControlCommand>) {
         let torrent = models::Torrent::new(client_id, dest_path, meta);
         let (controller_tx, controller_rx) = channel::<ControlCommand>();
-        (Self { torrent, event_tx }, controller_tx)
+        (
+            Self {
+                torrent,
+                event_tx,
+                scheduler: scheduler::Scheduler::new(),
+            },
+            controller_tx,
+        )
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
-        fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
-        fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
-        self.torrent.sync_with_disk()?;
-        let _ = self.torrent.sync_with_tracker();
-
-        let mut end_game_mode = false;
-        let mut concurrent_peers = 3;
+        self.setup()?;
         let (event_tx, event_rx) = channel::<peer::ControllerEvent>();
 
         loop {
             // Process events
             self.process_bounded_events(&event_rx, MAX_EVENTS_PER_CYCLE)?;
-
-            // Check updated status
-            let pending_blocks_count = self
-                .torrent
-                .blocks
-                .iter()
-                .filter(|(_block_id, block)| {
-                    matches!(
-                        block.data_status,
-                        BlockStatus::Pending | BlockStatus::Requested(_)
-                    )
-                })
-                .count();
-            // Enqueue download requests for pending blocks.
-            if pending_blocks_count > 0 {
-                if pending_blocks_count < 3 {
-                    end_game_mode = true;
-                    concurrent_peers = 10;
-                }
-                reset_finished_peers(&mut self.torrent);
-                schedule(
-                    &mut self.torrent,
-                    event_tx.clone(),
-                    end_game_mode,
-                    concurrent_peers,
-                );
-            } else {
-                self.torrent
-                    .verify_blocks_and_files(PIECE_VERIFICATION_BATCH_SIZE)?;
-                let pending_file_indices = self
-                    .torrent
-                    .files
-                    .iter()
-                    .filter(|file| file.path.is_none() || !file.verified)
-                    .map(|file| file.index)
-                    .collect::<Vec<usize>>();
-                if pending_file_indices.is_empty() {
-                    break;
-                } else {
-                    for file_index in pending_file_indices {
-                        writer::write_file(&mut self.torrent, file_index)?;
-                    }
-                }
-            }
+            // Download pending blocks
+            self.scheduler.enqueue_pending_blocks(
+                &mut self.torrent,
+                event_tx.clone(),
+                BLOCK_SCHEDULING_BATCH_SIZE,
+            )?;
+            // Verify downloaded blocks
+            self.torrent
+                .verify_blocks_and_files(PIECE_VERIFICATION_BATCH_SIZE)?;
+            // Verify and write pending files
+            let pending_file_indices = writer::verify_and_write_pendinfg_files(
+                &mut self.torrent,
+                FILE_VERIFICATION_AND_WRITE_BATCH_SIZE,
+            )?;
+            // Send update to client
             self.send_torrent_controller_event();
+            // End controller if no files pending.
+            if pending_file_indices == 0 {
+                break;
+            }
             thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
         }
         self.cleanup()
@@ -219,6 +196,14 @@ impl Controller {
                 })
                 .unwrap();
         }
+    }
+
+    fn setup(&mut self) -> anyhow::Result<()> {
+        fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
+        fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
+        self.torrent.sync_with_disk()?;
+        let _ = self.torrent.sync_with_tracker();
+        Ok(())
     }
 
     fn cleanup(&mut self) -> anyhow::Result<()> {
