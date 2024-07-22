@@ -21,7 +21,7 @@ use crate::peer;
 const MAX_EVENTS_PER_CYCLE: usize = 10000;
 const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
 const BLOCK_SCHEDULING_BATCH_SIZE: usize = 500;
-const PIECE_VERIFICATION_BATCH_SIZE: usize = 50;
+const PIECE_VERIFICATION_BATCH_SIZE: usize = 100;
 const FILE_VERIFICATION_AND_WRITE_BATCH_SIZE: usize = 3;
 
 #[derive(Debug)]

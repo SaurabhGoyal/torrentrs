@@ -141,18 +141,7 @@ impl Client {
                     .state
                     .torrents
                     .iter_mut()
-                    .filter(|(_, torrent_obj)| torrent_obj.handle.is_some())
-                    .filter(|(_, torrent_obj)| {
-                        let mut files_complete = false;
-                        if let Some(state) = torrent_obj.state.as_ref() {
-                            files_complete = state.files.len() == state
-                            .files
-                            .iter()
-                            .filter(|(_, downloaded, _)| *downloaded)
-                            .count();
-                        }
-                        files_complete
-                    })
+                    .filter(|(_, torrent_obj)| torrent_obj.handle.is_some() && torrent_obj.handle.as_ref().unwrap().is_finished())
                 {
                     let _ = torrent_obj.handle.take().unwrap().join();
                 }
@@ -260,7 +249,14 @@ impl Client {
                 if state.files.len() == state
                 .files
                 .iter()
-                .filter(|(_, downloaded, _)| *downloaded)
+                .filter(|(_, downloaded, verified)| *downloaded && !*verified)
+                .count() {
+                    status = "Downloaded, verifying files";
+                }
+                if state.files.len() == state
+                .files
+                .iter()
+                .filter(|(_, downloaded, verified)| *downloaded && *verified)
                 .count() {
                     status = "Completed";
                 }

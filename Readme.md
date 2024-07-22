@@ -46,6 +46,7 @@ Server level
 - [ ] Better management for choke and interest actions for both parties.
 
 Others
+- [ ] Peer ban based on hash fails
 - [ ] Unit tests
 - [ ] Blog post
 - [ ] Reduce memory footprint
