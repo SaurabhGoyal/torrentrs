@@ -78,8 +78,6 @@ impl Scheduler {
         for (_block_id, block) in pending_blocks.into_iter().take(max_count) {
             let peers_with_current_block = torrent
                 .peers
-                .as_mut()
-                .unwrap()
                 .iter_mut()
                 .filter(|(_peer_id, peer)| {
                     peer.control_rx.is_some()
@@ -93,8 +91,6 @@ impl Scheduler {
             if peers_with_current_block.len() < MIN_PEERS_FOR_DOWNLOAD {
                 torrent
                     .peers
-                    .as_mut()
-                    .unwrap()
                     .iter_mut()
                     .filter(|(_peer_id, peer)| {
                         peer.control_rx.is_none()
@@ -157,8 +153,6 @@ impl Scheduler {
         // Update peers
         for (_peer_id, peer) in torrent
             .peers
-            .as_mut()
-            .unwrap()
             .iter_mut()
             .filter(|(_peer_id, peer)| peer.handle.is_some())
         {

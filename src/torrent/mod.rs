@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use event_processor::process_event;
-use models::{BlockStatus, Torrent, PEER_ID_BYTE_LEN};
+use models::{BlockStatus, Torrent, INFO_HASH_BYTE_LEN, PEER_ID_BYTE_LEN};
 
 use crate::bencode;
 use crate::peer;
@@ -55,7 +55,7 @@ pub enum Event {
 
 #[derive(Debug)]
 pub struct ControllerEvent {
-    pub hash: [u8; PEER_ID_BYTE_LEN],
+    pub hash: [u8; INFO_HASH_BYTE_LEN],
     pub event: Event,
 }
 
@@ -168,8 +168,6 @@ impl Controller {
         let peers = self
             .torrent
             .peers
-            .as_ref()
-            .unwrap()
             .iter()
             .map(|(peer_id, peer)| (peer_id.to_string(), peer.control_rx.is_some()))
             .collect::<Vec<(String, bool)>>();
@@ -202,7 +200,7 @@ impl Controller {
         fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
         fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         self.torrent.sync_with_disk()?;
-        let _ = self.torrent.sync_with_tracker();
+        self.torrent.sync_with_tracker()?;
         Ok(())
     }
 
@@ -217,8 +215,6 @@ impl Controller {
         for (_peer_id, peer) in self
             .torrent
             .peers
-            .as_mut()
-            .unwrap()
             .iter_mut()
             .filter(|(_peer_id, peer)| peer.handle.is_some())
         {

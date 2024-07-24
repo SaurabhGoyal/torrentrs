@@ -19,12 +19,7 @@ pub(super) fn process_event(
 ) -> anyhow::Result<()> {
     let piece_count = torrent.pieces.len();
     let peer_id = formatter::get_peer_id(event.ip.as_str(), event.port);
-    let peer = torrent
-        .peers
-        .as_mut()
-        .unwrap()
-        .get_mut(peer_id.as_str())
-        .unwrap();
+    let peer = torrent.peers.get_mut(peer_id.as_str()).unwrap();
     match event.event {
         peer::Event::Control(control_rx) => peer.control_rx = Some(control_rx),
         peer::Event::State(event) => match (event, peer.state.as_mut()) {

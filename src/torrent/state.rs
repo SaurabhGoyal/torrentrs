@@ -1,32 +1,20 @@
-use std::collections::HashSet;
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::PathBuf;
+use std::time::Duration;
 use std::{cmp::min, collections::HashMap};
-use std::{path::PathBuf, sync::mpsc::Sender, thread::JoinHandle, time::SystemTime};
 
-use sha1::{Digest as _, Sha1};
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use crate::{bencode, utils};
 
 use super::models::{Block, BlockStatus, File, Peer, Piece, Torrent};
 use super::{formatter, writer};
 
-pub(super) const MAX_BLOCK_LENGTH: usize = 1 << 14;
+const MAX_BLOCK_LENGTH: usize = 1 << 14;
 
-use crate::peer;
-
-pub(super) const CLIENT_PORT: usize = 12457;
-pub(super) const INFO_HASH_BYTE_LEN: usize = 20;
-pub(super) const PEER_ID_BYTE_LEN: usize = 20;
-pub(super) const PIECE_HASH_BYTE_LEN: usize = 20;
-
-pub(super) const MAX_CONCURRENT_BLOCKS: usize = 500;
-pub(super) const MIN_PEERS_FOR_DOWNLOAD: usize = 1;
-pub(super) const BLOCK_REQUEST_TIMEOUT_MS: u64 = 6000;
-pub(super) const PEER_REQUEST_TIMEOUT_MS: u64 = 6000;
-pub(super) const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
-pub(super) const MAX_EVENTS_PER_CYCLE: i32 = 10000;
+const CLIENT_PORT: usize = 12457;
+const ANNOUNCE_TIMEOUT_SECS: u64 = 60;
+const PEER_ID_BYTE_LEN: usize = 20;
 
 impl Torrent {
     pub(super) fn new(
@@ -120,13 +108,13 @@ impl Torrent {
             files,
             pieces,
             blocks,
-            peers: None,
+            peers: HashMap::new(),
             downloaded_window_second: (0, 0),
         }
     }
 
     pub(super) fn sync_with_tracker(&mut self) -> anyhow::Result<()> {
-        self.peers = Some(self.get_announce_response()?);
+        self.peers.extend(self.get_announce_response()?);
         Ok(())
     }
 
@@ -237,6 +225,7 @@ impl Torrent {
         ));
         let req = client
             .get(url)
+            .timeout(Duration::from_secs(ANNOUNCE_TIMEOUT_SECS))
             .query(&[("port", CLIENT_PORT)])
             .query(&[("uploaded", 0)])
             .query(&[(

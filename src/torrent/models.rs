@@ -4,8 +4,6 @@ use std::{
 
 use crate::peer;
 
-pub(super) const MAX_BLOCK_LENGTH: usize = 1 << 14;
-pub(super) const CLIENT_PORT: usize = 12457;
 pub(super) const INFO_HASH_BYTE_LEN: usize = 20;
 pub(super) const PEER_ID_BYTE_LEN: usize = 20;
 pub(super) const PIECE_HASH_BYTE_LEN: usize = 20;
@@ -67,6 +65,6 @@ pub(super) struct Torrent {
     pub(super) files: Vec<File>,
     pub(super) pieces: Vec<Piece>,
     pub(super) blocks: HashMap<String, Block>,
-    pub(super) peers: Option<HashMap<String, Peer>>,
+    pub(super) peers: HashMap<String, Peer>,
     pub(super) downloaded_window_second: (u64, usize),
 }

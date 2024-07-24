@@ -31,7 +31,7 @@ Single torrent level
 - [ ] Seed.
 
 Client level
-- [ ] Persist torrents state.
+- [x] Persist torrents state.
 - [ ] CRUD for torrents.
 - [ ] TUI.
 
