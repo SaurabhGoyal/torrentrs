@@ -1,19 +1,17 @@
+use core::str;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::{cmp::min, collections::HashMap};
 
 use walkdir::WalkDir;
 
 use crate::{bencode, utils};
 
-use super::models::{Block, BlockStatus, File, Peer, Piece, Torrent};
+use super::models::{Block, BlockStatus, File, Piece, Torrent};
 use super::{formatter, writer};
 
 const MAX_BLOCK_LENGTH: usize = 1 << 14;
 
-const CLIENT_PORT: usize = 12457;
-const ANNOUNCE_TIMEOUT_SECS: u64 = 60;
 const PEER_ID_BYTE_LEN: usize = 20;
 
 impl Torrent {
@@ -113,11 +111,6 @@ impl Torrent {
         }
     }
 
-    pub(super) fn sync_with_tracker(&mut self) -> anyhow::Result<()> {
-        self.peers.extend(self.get_announce_response()?);
-        Ok(())
-    }
-
     pub(super) fn sync_with_disk(&mut self) -> anyhow::Result<()> {
         let temp_dir_path = self.get_temp_dir_path();
         for entry in fs::read_dir(temp_dir_path.as_path())?.filter_map(|e| e.ok()) {
@@ -209,70 +202,6 @@ impl Torrent {
             }
         }
         Ok(())
-    }
-
-    fn get_announce_response(&self) -> anyhow::Result<HashMap<String, Peer>> {
-        let client = reqwest::blocking::Client::new();
-        // Workaround for issue with binary data - https://github.com/servo/rust-url/issues/219
-        let mut url = reqwest::Url::parse(self.tracker.as_str())?;
-        url.set_query(Some(
-            format!(
-                "info_hash={}&peer_id={}",
-                utils::bytes_to_hex_encoding(&self.hash),
-                utils::bytes_to_hex_encoding(&self.client_id),
-            )
-            .as_str(),
-        ));
-        let req = client
-            .get(url)
-            .timeout(Duration::from_secs(ANNOUNCE_TIMEOUT_SECS))
-            .query(&[("port", CLIENT_PORT)])
-            .query(&[("uploaded", 0)])
-            .query(&[(
-                "downloaded",
-                self.blocks
-                    .iter()
-                    .filter(|(_, block)| {
-                        matches!(
-                            block.data_status,
-                            BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
-                        )
-                    })
-                    .map(|(_, block)| block.length)
-                    .sum::<usize>(),
-            )])
-            .query(&[(
-                "left",
-                self.blocks
-                    .iter()
-                    .filter(|(_, block)| {
-                        !matches!(
-                            block.data_status,
-                            BlockStatus::PersistedSeparately(_) | BlockStatus::PersistedInFile
-                        )
-                    })
-                    .map(|(_, block)| block.length)
-                    .sum::<usize>(),
-            )])
-            .build()?;
-        let res = client.execute(req)?.bytes()?;
-        let peers_info = bencode::decode_peers(res.as_ref())?;
-        Ok(peers_info
-            .into_iter()
-            .map(|peer_info| {
-                (
-                    formatter::get_peer_id(peer_info.ip.as_str(), peer_info.port),
-                    Peer {
-                        ip: peer_info.ip,
-                        port: peer_info.port,
-                        control_rx: None,
-                        state: None,
-                        last_initiated_at: None,
-                        handle: None,
-                    },
-                )
-            })
-            .collect::<HashMap<String, Peer>>())
     }
 
     pub(super) fn get_temp_dir_path(&self) -> PathBuf {

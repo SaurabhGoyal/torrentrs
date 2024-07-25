@@ -1,8 +1,6 @@
 use rand::{Rng as _, RngCore};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write;
 use std::path::PathBuf;
-use std::time::SystemTime;
 use std::{
     collections::HashMap,
     fs,
@@ -17,8 +15,7 @@ use crate::{
     bencode,
     torrent::{self, ControllerEvent},
 };
-// Piece hash byte length
-const INFO_HASH_BYTE_LEN: usize = 20;
+
 const PEER_ID_BYTE_LEN: usize = 20;
 const MAX_EVENTS_PER_CYCLE: usize = 500;
 const DB_FILE: &str = "client.json";
@@ -150,7 +147,6 @@ impl Client {
             }
             thread::sleep(Duration::from_millis(1000));
         }
-        Ok(())
     }
 
     fn add_torrent(&mut self, file_path: &str, dest_path: &str) -> anyhow::Result<()> {

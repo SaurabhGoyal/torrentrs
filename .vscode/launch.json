@@ -20,15 +20,17 @@
                 }
             },
             "args": [
-                "local",
+                "local/ws",
+                "sample_torrents/sample_4_udp.torrent",
+                "local/ws",
                 // "sample_torrents/sample_5.torrent",
                 // "local/test2",
                 // "sample_torrents/sample.torrent",
                 // "local/test2",
                 // "sample_torrents/sample_7_multifile.torrent",
                 // "local/test2",
-                "/mnt/c/Users/Saurabh/Desktop/Madagascar 2005 1080p BrRip x264 1GB YIFY.torrent",
-                "local/test3",
+                // "/mnt/c/Users/Saurabh/Desktop/Madagascar 2005 1080p BrRip x264 1GB YIFY.torrent",
+                // "local/test3",
             ],
             "cwd": "${workspaceFolder}"
         },

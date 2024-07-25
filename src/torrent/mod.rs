@@ -3,6 +3,7 @@ mod formatter;
 mod models;
 mod scheduler;
 mod state;
+mod tracker;
 mod writer;
 
 use std::fs;
@@ -13,7 +14,9 @@ use std::thread;
 use std::time::Duration;
 
 use event_processor::process_event;
+use models::Peer;
 use models::{BlockStatus, Torrent, INFO_HASH_BYTE_LEN, PEER_ID_BYTE_LEN};
+use tracker::sync_with_tracker;
 
 use crate::bencode;
 use crate::peer;
@@ -36,7 +39,6 @@ pub struct State {
     pub files: Vec<(String, bool, bool)>,
     pub blocks: Vec<(String, bool, bool)>,
     pub peers: Vec<(String, bool)>,
-    pub downloaded_window_second: (u64, usize),
 }
 
 #[derive(Debug)]
@@ -67,7 +69,7 @@ impl Controller {
         event_tx: Sender<ControllerEvent>,
     ) -> (Self, Sender<ControlCommand>) {
         let torrent = models::Torrent::new(client_id, dest_path, meta);
-        let (controller_tx, controller_rx) = channel::<ControlCommand>();
+        let (controller_tx, _controller_rx) = channel::<ControlCommand>();
         (
             Self {
                 torrent,
@@ -179,7 +181,6 @@ impl Controller {
                     files,
                     blocks,
                     peers,
-                    downloaded_window_second: self.torrent.downloaded_window_second,
                 }),
             })
             .unwrap();
@@ -200,7 +201,21 @@ impl Controller {
         fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
         fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         self.torrent.sync_with_disk()?;
-        self.torrent.sync_with_tracker()?;
+        let tracker_peers = sync_with_tracker(&self.torrent)?;
+        tracker_peers.into_iter().map(|(ip, port)| {
+            self.torrent.peers.insert(
+                formatter::get_peer_id(ip.as_str(), port),
+                Peer {
+                    ip,
+                    port,
+                    control_rx: None,
+                    state: None,
+                    last_initiated_at: None,
+                    handle: None,
+                },
+            );
+        });
+        // TODO: Add peer refreshing in case no peers.
         Ok(())
     }
 

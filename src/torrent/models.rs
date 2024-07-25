@@ -6,7 +6,7 @@ use crate::peer;
 
 pub(super) const INFO_HASH_BYTE_LEN: usize = 20;
 pub(super) const PEER_ID_BYTE_LEN: usize = 20;
-pub(super) const PIECE_HASH_BYTE_LEN: usize = 20;
+const PIECE_HASH_BYTE_LEN: usize = 20;
 
 #[derive(Debug)]
 pub(super) struct File {
