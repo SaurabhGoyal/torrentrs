@@ -49,7 +49,6 @@ impl Scheduler {
                 self.end_game_mode = true;
                 self.concurrent_peers = 10;
             }
-            self.reset_finished_peers(torrent);
             self.schedule(torrent, event_tx, max_count);
         }
         Ok(pending_blocks_count)
@@ -96,7 +95,7 @@ impl Scheduler {
                         peer.control_rx.is_none()
                             && (peer.last_initiated_at.is_none()
                                 || SystemTime::now()
-                                    .duration_since(*peer.last_initiated_at.as_ref().unwrap())
+                                    .duration_since(peer.last_initiated_at.unwrap())
                                     .unwrap()
                                     > Duration::from_millis(PEER_REQUEST_TIMEOUT_MS))
                     })
@@ -145,22 +144,6 @@ impl Scheduler {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    fn reset_finished_peers(&self, torrent: &mut Torrent) {
-        // Update peers
-        for (_peer_id, peer) in torrent
-            .peers
-            .iter_mut()
-            .filter(|(_peer_id, peer)| peer.handle.is_some())
-        {
-            if peer.handle.as_ref().unwrap().is_finished() {
-                peer.control_rx = None;
-                peer.state = None;
-                peer.state = None;
-                peer.last_initiated_at = None;
             }
         }
     }

@@ -101,7 +101,7 @@ impl Torrent {
             client_id,
             dest_path,
             hash: meta.info_hash,
-            tracker: meta.tracker.clone(),
+            trackers: meta.trackers.clone(),
             directory: meta.directory.clone(),
             files,
             pieces,

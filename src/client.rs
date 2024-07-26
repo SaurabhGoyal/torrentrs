@@ -190,7 +190,7 @@ impl Client {
             &torrent.metainfo,
             torrent.dest_path.as_str(),
             self.event_tx.clone(),
-        );
+        )?;
         torrent.control_tx = Some(control_tx);
         torrent.handle = Some(thread::spawn(move || torrent_controller.start().unwrap()));
         Ok(())

@@ -12,11 +12,12 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use event_processor::process_event;
 use models::Peer;
 use models::{BlockStatus, Torrent, INFO_HASH_BYTE_LEN, PEER_ID_BYTE_LEN};
-use tracker::sync_with_tracker;
+use tracker::TrackerManager;
 
 use crate::bencode;
 use crate::peer;
@@ -26,10 +27,12 @@ const BLOCK_SCHEDULER_FREQUENCY_MS: u64 = 500;
 const BLOCK_SCHEDULING_BATCH_SIZE: usize = 500;
 const PIECE_VERIFICATION_BATCH_SIZE: usize = 100;
 const FILE_VERIFICATION_AND_WRITE_BATCH_SIZE: usize = 3;
+const MAX_PEERS_FROM_TRACKERS: usize = 20;
 
 #[derive(Debug)]
 pub struct Controller {
     torrent: Torrent,
+    tracker_manager: tracker::TrackerManager,
     scheduler: scheduler::Scheduler,
     event_tx: Sender<ControllerEvent>,
 }
@@ -67,17 +70,19 @@ impl Controller {
         meta: &bencode::MetaInfo,
         dest_path: &str,
         event_tx: Sender<ControllerEvent>,
-    ) -> (Self, Sender<ControlCommand>) {
+    ) -> anyhow::Result<(Self, Sender<ControlCommand>)> {
         let torrent = models::Torrent::new(client_id, dest_path, meta);
+        let tracker_manager = tracker::TrackerManager::new(torrent.trackers.as_slice())?;
         let (controller_tx, _controller_rx) = channel::<ControlCommand>();
-        (
+        Ok((
             Self {
                 torrent,
                 event_tx,
+                tracker_manager,
                 scheduler: scheduler::Scheduler::new(),
             },
             controller_tx,
-        )
+        ))
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
@@ -87,6 +92,8 @@ impl Controller {
         loop {
             // Process events
             self.process_bounded_events(&event_rx, MAX_EVENTS_PER_CYCLE)?;
+            // Refresh peers
+            self.refresh_peers()?;
             // Download pending blocks
             self.scheduler.enqueue_pending_blocks(
                 &mut self.torrent,
@@ -134,6 +141,54 @@ impl Controller {
                     std::sync::mpsc::TryRecvError::Disconnected => todo!(),
                 },
             }
+        }
+        Ok(())
+    }
+
+    fn refresh_peers(&mut self) -> anyhow::Result<()> {
+        // Reset finished peers
+        for (_peer_id, peer) in self
+            .torrent
+            .peers
+            .iter_mut()
+            .filter(|(_peer_id, peer)| peer.handle.is_some())
+        {
+            if peer.handle.as_ref().unwrap().is_finished() {
+                peer.control_rx = None;
+                peer.state = None;
+                peer.handle = None;
+            }
+        }
+        if self
+            .torrent
+            .peers
+            .iter()
+            .filter(|(_peer_id, peer)| {
+                peer.last_initiated_at.is_none()
+                    || SystemTime::now()
+                        .duration_since(peer.last_initiated_at.unwrap())
+                        .unwrap()
+                        < Duration::from_secs(240)
+            })
+            .count()
+            == 0
+        {
+            let trackers_peers = self
+                .tracker_manager
+                .sync_with_trackers(&self.torrent, MAX_PEERS_FROM_TRACKERS)?;
+            trackers_peers.into_iter().for_each(|(ip, port)| {
+                self.torrent.peers.insert(
+                    formatter::get_peer_id(ip.as_str(), port),
+                    Peer {
+                        ip,
+                        port,
+                        control_rx: None,
+                        state: None,
+                        last_initiated_at: None,
+                        handle: None,
+                    },
+                );
+            });
         }
         Ok(())
     }
@@ -201,21 +256,6 @@ impl Controller {
         fs::create_dir_all(self.torrent.dest_path.as_path()).unwrap();
         fs::create_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         self.torrent.sync_with_disk()?;
-        let tracker_peers = sync_with_tracker(&self.torrent)?;
-        tracker_peers.into_iter().map(|(ip, port)| {
-            self.torrent.peers.insert(
-                formatter::get_peer_id(ip.as_str(), port),
-                Peer {
-                    ip,
-                    port,
-                    control_rx: None,
-                    state: None,
-                    last_initiated_at: None,
-                    handle: None,
-                },
-            );
-        });
-        // TODO: Add peer refreshing in case no peers.
         Ok(())
     }
 

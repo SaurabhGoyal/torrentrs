@@ -9,6 +9,8 @@ use bendy::decoding::{self, Decoder, Object};
 
 // "announce" key
 const ANNOUNCE_KEY: &[u8] = "announce".as_bytes();
+// "announce" key
+const ANNOUNCE_LIST_KEY: &[u8] = "announce-list".as_bytes();
 // "info" key
 const INFO_KEY: &[u8] = "info".as_bytes();
 // "name" key
@@ -55,7 +57,7 @@ pub struct PeerInfo {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetaInfo {
     pub info_hash: [u8; INFO_HASH_BYTE_LEN],
-    pub tracker: String,
+    pub trackers: Vec<String>,
     pub files: Vec<FileInfo>,
     pub directory: Option<PathBuf>,
     pub pieces: Vec<PieceInfo>,
@@ -64,7 +66,8 @@ pub struct MetaInfo {
 pub fn decode_metainfo(metainfo: &[u8]) -> anyhow::Result<MetaInfo> {
     let mut decoder = Decoder::new(metainfo);
     let mut info_hash: Option<[u8; INFO_HASH_BYTE_LEN]> = None;
-    let mut tracker: Option<&str> = None;
+    let mut tracker: Option<String> = None;
+    let mut secondary_trackers = vec![];
     let mut primary_file_name: Option<PathBuf> = None;
     let mut primary_file_length: Option<u64> = None;
     let mut files = vec![];
@@ -74,7 +77,16 @@ pub fn decode_metainfo(metainfo: &[u8]) -> anyhow::Result<MetaInfo> {
         while let Ok(Some((key, value))) = metainfo_object.next_pair() {
             match (key, value) {
                 (ANNOUNCE_KEY, Object::Bytes(value)) => {
-                    tracker = Some(str::from_utf8(value)?);
+                    tracker = Some(str::from_utf8(value)?.to_string());
+                }
+                (ANNOUNCE_LIST_KEY, Object::List(mut announce_list)) => {
+                    while let Ok(Some(Object::List(mut tracket_data_list))) =
+                        announce_list.next_object()
+                    {
+                        while let Ok(Some(Object::Bytes(value))) = tracket_data_list.next_object() {
+                            secondary_trackers.push(str::from_utf8(value)?.to_string());
+                        }
+                    }
                 }
                 (INFO_KEY, Object::Dict(mut value)) => {
                     while let Ok(Some((key, value))) = value.next_pair() {
@@ -156,8 +168,11 @@ pub fn decode_metainfo(metainfo: &[u8]) -> anyhow::Result<MetaInfo> {
         }
         _ => {}
     }
+    let mut trackers = vec![tracker.unwrap()];
+    trackers.extend(secondary_trackers);
+
     Ok(MetaInfo {
-        tracker: tracker.unwrap().to_string(),
+        trackers,
         files,
         pieces: piece_hashes
             .into_iter()

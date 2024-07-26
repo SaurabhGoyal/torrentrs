@@ -60,7 +60,7 @@ pub(super) struct Torrent {
     pub(super) client_id: [u8; PEER_ID_BYTE_LEN],
     pub(super) dest_path: PathBuf,
     pub(super) hash: [u8; INFO_HASH_BYTE_LEN],
-    pub(super) tracker: String,
+    pub(super) trackers: Vec<String>,
     pub(super) directory: Option<PathBuf>,
     pub(super) files: Vec<File>,
     pub(super) pieces: Vec<Piece>,
