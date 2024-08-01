@@ -3,6 +3,7 @@ use std::env;
 mod bencode;
 mod client;
 mod peer;
+mod peer_async;
 mod torrent;
 mod utils;
 
