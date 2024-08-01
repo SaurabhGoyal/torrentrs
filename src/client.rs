@@ -1,25 +1,24 @@
-use rand::{Rng as _, RngCore as _};
+use rand::{Rng as _, RngCore};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc as tokio_mpsc;
-use tokio::task::JoinHandle;
 use std::path::PathBuf;
 use std::{
     collections::HashMap,
     fs,
     io::{self, Read, Write as _},
-    sync::mpsc::Sender,
+    sync::mpsc::{channel, Receiver, Sender},
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use crate::utils;
 use crate::{
     bencode,
-    torrent,
+    torrent::{self, ControllerEvent},
 };
 
 const PEER_ID_BYTE_LEN: usize = 20;
+const MAX_EVENTS_PER_CYCLE: usize = 500;
 const DB_FILE: &str = "client.json";
-const CLIENT_CONTROL_CHANNEL_BUFFER_SIZE: usize = 10;
-const CLIENT_INTERNAL_EVENT_CHANNEL_BUFFER_SIZE: usize = 1000;
 
 #[derive(Debug, Deserialize, Serialize)]
 enum TorrentStatus {
@@ -41,12 +40,6 @@ pub enum ClientControlCommand {
     AddTorrent(String, String),
 }
 
-#[derive(Debug)]
-enum ClientInternalEvent {
-    Command(ClientControlCommand),
-    TorrentEvent(torrent::ControllerEvent),
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 struct Torrent {
     file_path: String,
@@ -56,7 +49,7 @@ struct Torrent {
     #[serde(skip)]
     control_tx: Option<Sender<torrent::ControlCommand>>,
     #[serde(skip)]
-    handle: Option<JoinHandle<anyhow::Result<()>>>,
+    handle: Option<JoinHandle<()>>,
     #[serde(skip)]
     state: Option<TorrentState>,
 }
@@ -70,72 +63,90 @@ pub struct ClientState {
 
 pub struct Client {
     state: ClientState,
-    event_tx: tokio_mpsc::Sender<torrent::ControllerEvent>,
-    event_rx: Option<tokio_mpsc::Receiver<torrent::ControllerEvent>>,
-    control_rx: Option<tokio_mpsc::Receiver<ClientControlCommand>>,
+    event_tx: Sender<ControllerEvent>,
+    event_rx: Receiver<ControllerEvent>,
+    control_rx: Receiver<ClientControlCommand>,
 }
 
 impl Client {
-    pub fn new(data_dir: &str) -> anyhow::Result<(Self, tokio_mpsc::Sender<ClientControlCommand>)> {
-        let (event_tx, event_rx) = tokio_mpsc::channel::<torrent::ControllerEvent>(CLIENT_INTERNAL_EVENT_CHANNEL_BUFFER_SIZE);
-        let (control_tx, control_rx) = tokio_mpsc::channel::<ClientControlCommand>(CLIENT_CONTROL_CHANNEL_BUFFER_SIZE);
+    pub fn new(data_dir: &str) -> anyhow::Result<(Self, Sender<ClientControlCommand>)> {
+        let (event_tx, event_rx) = channel::<torrent::ControllerEvent>();
+        let (control_tx, control_rx) = channel::<ClientControlCommand>();
         Ok((
             Self {
                 state: init_state(data_dir)?,
                 event_tx,
-                event_rx: Some(event_rx),
-                control_rx: Some(control_rx),
+                event_rx,
+                control_rx,
             },
             control_tx,
         ))
     }
 
-    pub async fn start(&mut self) -> anyhow::Result<()> {
-        // Create channel for handling all activity on client.
-        let (internal_event_tx, mut internal_event_rx) = tokio_mpsc::channel::<ClientInternalEvent>(CLIENT_INTERNAL_EVENT_CHANNEL_BUFFER_SIZE);
-        
-        // Trigger task to redirect commands to internal event channel.
-        let internal_event_tx_clone = internal_event_tx.clone();
-        let rx = self.control_rx.take().unwrap();
-        let command_pipe_handle = tokio::spawn(async move {
-            redirect_commands(rx, internal_event_tx_clone).await?;
-            Ok::<(), anyhow::Error>(())
-        });
+    pub fn start(&mut self) -> anyhow::Result<()> {
+        loop {
+            {
+                // Process commands
+                loop {
+                    match self.control_rx.try_recv() {
+                        Ok(cmd) => {
+                            match cmd {
+                                ClientControlCommand::AddTorrent(file_path, dest_path) => {
+                                    let res =
+                                        self.add_torrent(file_path.as_str(), dest_path.as_str());
+                                    println!("Add - {file_path} -> {dest_path} = {:?}", res);
+                                }
+                            }
+                            // persist.
+                            self.save_state()?;
+                        }
+                        Err(e) => match e {
+                            std::sync::mpsc::TryRecvError::Empty => {
+                                break;
+                            }
+                            std::sync::mpsc::TryRecvError::Disconnected => {
+                                break;
+                            }
+                        },
+                    }
+                }
 
-        // Trigger task to redirect torrent events to internal event channel.
-        let internal_event_tx_clone = internal_event_tx.clone();
-        let rx = self.event_rx.take().unwrap();
-        let torrent_event_pipe_handle = tokio::spawn(async move {
-            redirect_torrent_events(rx, internal_event_tx_clone).await?;
-            Ok::<(), anyhow::Error>(())
-        });
+                // Process some events
+                let mut processed_events = 0;
+                loop {
+                    match self.event_rx.try_recv() {
+                        Ok(event) => {
+                            self.process_event(event)?;
+                            processed_events += 1;
+                            if processed_events > MAX_EVENTS_PER_CYCLE {
+                                break;
+                            }
+                        }
+                        Err(e) => match e {
+                            std::sync::mpsc::TryRecvError::Empty => {
+                                break;
+                            }
+                            std::sync::mpsc::TryRecvError::Disconnected => {
+                                // Don't do anything as this situation is where there is no ongoing torrents.
+                            }
+                        },
+                    }
+                }
 
-        // Process events from all tasks
-        while let Some(internal_event) =  internal_event_rx.recv().await {
-            match internal_event {
-                ClientInternalEvent::Command(cmd) => self.process_command(cmd)?,
-                ClientInternalEvent::TorrentEvent(controller_event) => self.process_event(controller_event)?,
+                // Update torrent threads
+                for (_, torrent_obj) in self
+                    .state
+                    .torrents
+                    .iter_mut()
+                    .filter(|(_, torrent_obj)| torrent_obj.handle.is_some() && torrent_obj.handle.as_ref().unwrap().is_finished())
+                {
+                    let _ = torrent_obj.handle.take().unwrap().join();
+                }
+                clear_screen();
+                println!("{}", self.render_view()?);
             }
-            self.save_state()?;
-            clear_screen();
-            println!("{}", self.render_view()?);
+            thread::sleep(Duration::from_millis(1000));
         }
-
-        // Wait on all tasks to finish.
-        command_pipe_handle.await??;
-        torrent_event_pipe_handle.await??;
-        Ok(())
-    }
-
-    fn process_command(&mut self, cmd: ClientControlCommand) -> anyhow::Result<()> {
-        match cmd {
-            ClientControlCommand::AddTorrent(file_path, dest_path) => {
-                let res =
-                    self.add_torrent(file_path.as_str(), dest_path.as_str());
-                println!("Add - {file_path} -> {dest_path} = {:?}", res);
-            }
-        }
-        Ok(())
     }
 
     fn add_torrent(&mut self, file_path: &str, dest_path: &str) -> anyhow::Result<()> {
@@ -166,6 +177,7 @@ impl Client {
             self.state
                 .torrents
                 .insert(utils::bytes_to_hex_encoding(&metainfo.info_hash), torrent);
+            self.save_state()?;
         }
         self.resume_torrent(&hash)?;
         Ok(())
@@ -180,11 +192,11 @@ impl Client {
             self.event_tx.clone(),
         )?;
         torrent.control_tx = Some(control_tx);
-        torrent.handle = Some(tokio::spawn(async move {torrent_controller.start().await?; Ok::<(), anyhow::Error>(())}));
+        torrent.handle = Some(thread::spawn(move || torrent_controller.start().unwrap()));
         Ok(())
     }
 
-    fn process_event(&mut self, event: torrent::ControllerEvent) -> anyhow::Result<()> {
+    fn process_event(&mut self, event: ControllerEvent) -> anyhow::Result<()> {
         let torrent = self
             .state
             .torrents
@@ -206,6 +218,7 @@ impl Client {
             },
             _ => {}
         }
+        self.save_state()?;
         Ok(())
     }
 
@@ -330,20 +343,6 @@ fn init_state(data_dir: &str) -> anyhow::Result<ClientState> {
         }
     };
     Ok(state)
-}
-
-async fn redirect_commands(mut rx: tokio_mpsc::Receiver<ClientControlCommand>, internal_event_tx: tokio_mpsc::Sender<ClientInternalEvent>) -> anyhow::Result<()> {
-    while let Some(msg) = rx.recv().await {
-        internal_event_tx.send(ClientInternalEvent::Command(msg)).await.unwrap();
-    }
-    Ok(())
-}
-
-async fn redirect_torrent_events(mut rx: tokio_mpsc::Receiver<torrent::ControllerEvent>, internal_event_tx: tokio_mpsc::Sender<ClientInternalEvent>) -> anyhow::Result<()> {
-    while let Some(msg) = rx.recv().await {
-        internal_event_tx.send(ClientInternalEvent::TorrentEvent(msg)).await.unwrap();
-    }
-    Ok(())
 }
 
 fn clear_screen() {

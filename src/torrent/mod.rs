@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use event_processor::process_event;
 use models::Peer;
 use models::{BlockStatus, Torrent, INFO_HASH_BYTE_LEN, PEER_ID_BYTE_LEN};
-use tokio::sync::mpsc as tokio_mpsc;
+use tracker::TrackerManager;
 
 use crate::bencode;
 use crate::peer;
@@ -34,7 +34,7 @@ pub struct Controller {
     torrent: Torrent,
     tracker_manager: tracker::TrackerManager,
     scheduler: scheduler::Scheduler,
-    event_tx: tokio_mpsc::Sender<ControllerEvent>,
+    event_tx: Sender<ControllerEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ impl Controller {
         client_id: [u8; PEER_ID_BYTE_LEN],
         meta: &bencode::MetaInfo,
         dest_path: &str,
-        event_tx: tokio_mpsc::Sender<ControllerEvent>,
+        event_tx: Sender<ControllerEvent>,
     ) -> anyhow::Result<(Self, Sender<ControlCommand>)> {
         let torrent = models::Torrent::new(client_id, dest_path, meta);
         let tracker_manager = tracker::TrackerManager::new(torrent.trackers.as_slice())?;
@@ -85,7 +85,7 @@ impl Controller {
         ))
     }
 
-    pub async fn start(&mut self) -> anyhow::Result<()> {
+    pub fn start(&mut self) -> anyhow::Result<()> {
         self.setup()?;
         let (event_tx, event_rx) = channel::<peer::ControllerEvent>();
 
@@ -109,14 +109,14 @@ impl Controller {
                 FILE_VERIFICATION_AND_WRITE_BATCH_SIZE,
             )?;
             // Send update to client
-            self.send_torrent_controller_event().await;
+            self.send_torrent_controller_event();
             // End controller if no files pending.
             if pending_file_indices == 0 {
                 break;
             }
             thread::sleep(Duration::from_millis(BLOCK_SCHEDULER_FREQUENCY_MS));
         }
-        self.cleanup().await
+        self.cleanup()
     }
 
     fn process_bounded_events(
@@ -193,7 +193,7 @@ impl Controller {
         Ok(())
     }
 
-    async fn send_torrent_controller_event(&self) {
+    fn send_torrent_controller_event(&self) {
         let mut blocks = self
             .torrent
             .blocks
@@ -238,7 +238,6 @@ impl Controller {
                     peers,
                 }),
             })
-            .await
             .unwrap();
         if self.torrent.downloaded_window_second.0 > 0 {
             self.event_tx
@@ -249,7 +248,6 @@ impl Controller {
                         self.torrent.downloaded_window_second.1,
                     )),
                 })
-                .await
                 .unwrap();
         }
     }
@@ -261,9 +259,9 @@ impl Controller {
         Ok(())
     }
 
-    async fn cleanup(&mut self) -> anyhow::Result<()> {
+    fn cleanup(&mut self) -> anyhow::Result<()> {
         // Send a final controller event to notify client of the state.
-        self.send_torrent_controller_event().await;
+        self.send_torrent_controller_event();
         // Remove temp dir.
         fs::remove_dir_all(self.torrent.get_temp_dir_path()).unwrap();
         // Wait for all files to be written.
