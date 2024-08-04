@@ -2,7 +2,7 @@ use std::{
     collections::HashMap, path::PathBuf, sync::mpsc::Sender, thread::JoinHandle, time::SystemTime,
 };
 
-use crate::peer;
+use crate::{peer, peer_async};
 
 pub(super) const INFO_HASH_BYTE_LEN: usize = 20;
 pub(super) const PEER_ID_BYTE_LEN: usize = 20;
@@ -49,7 +49,7 @@ pub(super) struct Block {
 pub(super) struct Peer {
     pub(super) ip: String,
     pub(super) port: u16,
-    pub(super) state: Option<peer::State>,
+    pub(super) state: Option<peer_async::State>,
     pub(super) last_initiated_at: Option<SystemTime>,
 }
 

@@ -6,6 +6,7 @@ mod state;
 
 use std::{collections::HashMap, path::PathBuf};
 
+use event_processor::process_event;
 use models::{BlockStatus, Torrent, INFO_HASH_BYTE_LEN, PEER_ID_BYTE_LEN};
 
 use crate::{bencode, peer_async};
@@ -95,13 +96,17 @@ impl Controller {
             .collect::<Vec<String>>();
         for peer_id in peer_ids {
             let mut controller = self.peer_controllers.remove(&peer_id).unwrap();
-            peer_handles.push(tokio::spawn(async move {
-                Ok::<Option<peer_async::Event>, anyhow::Error>(controller.listen().await?)
-            }));
+            peer_handles.push((
+                peer_id,
+                tokio::spawn(async move { controller.listen().await }),
+            ));
         }
         let mut any_peer_event = false;
-        while let Some(peer_handle) = peer_handles.pop() {
-            any_peer_event = any_peer_event || peer_handle.await??.is_some();
+        while let Some((peer_id, peer_handle)) = peer_handles.pop() {
+            if let Some(event) = peer_handle.await?? {
+                process_event(&mut self.torrent, peer_id.as_str(), event)?;
+                any_peer_event = true;
+            }
         }
         Ok(if any_peer_event {
             Some(self.get_event_from_state())
@@ -142,8 +147,8 @@ impl Controller {
         let peers = self
             .torrent
             .peers
-            .iter()
-            .map(|(peer_id, _peer)| {
+            .keys()
+            .map(|peer_id| {
                 (
                     peer_id.to_string(),
                     self.peer_controllers.contains_key(peer_id),

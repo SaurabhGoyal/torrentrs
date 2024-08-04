@@ -1,4 +1,5 @@
 mod models;
+pub(crate) mod render;
 
 pub(crate) use models::{ClientControlCommand, ClientState as _, TorrentState};
 use rand::{Rng as _, RngCore as _};

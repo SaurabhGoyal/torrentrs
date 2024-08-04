@@ -22,7 +22,8 @@ async fn main() {
         index += 2;
     }
     while let Some(state) = client.listen().await.unwrap() {
-        println!("{:?}", state);
+        client_async::render::clear_screen();
+        println!("{}", client_async::render::view_state(state));
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
